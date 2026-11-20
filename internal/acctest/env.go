@@ -65,9 +65,13 @@ func SetupEnv(ctx context.Context) (*Env, error) {
 
 // NewProxy starts another sign-in proxy in front of the same container, for tests that
 // need to stop one without affecting the others.
-func (e *Env) NewProxy() (*tdsproxy.Proxy, error) {
+func (e *Env) NewProxy() (*tdsproxy.Proxy, error) { return e.NewProxyAt("127.0.0.1:0") }
+
+// NewProxyAt starts a sign-in proxy listening on a given address, for example to bring
+// a proxy back on the address of one that was closed.
+func (e *Env) NewProxyAt(listenAddr string) (*tdsproxy.Proxy, error) {
 	return tdsproxy.Start(tdsproxy.Config{
-		ListenAddr:   "127.0.0.1:0",
+		ListenAddr:   listenAddr,
 		Certificate:  e.Certs.Server,
 		Token:        e.Token,
 		UpstreamAddr: e.Container.Addr,

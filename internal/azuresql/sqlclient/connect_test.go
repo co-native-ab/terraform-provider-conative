@@ -115,14 +115,14 @@ func TestBudgetExhaustedReturnsLastError(t *testing.T) {
 	for i := range errs {
 		errs[i] = sqlError(40613)
 	}
-	errs[3] = sqlError(49920) // the last error before giving up is the one returned
+	errs[4] = sqlError(49920) // the fifth attempt is the last; its error is the one returned
 	h := newHarness(2*time.Minute, errs...)
 	_, err := h.conn.Connect(context.Background())
 	if err == nil {
 		t.Fatal("want an error")
 	}
 	var sqlErr mssql.Error
-	if !errors.As(err, &sqlErr) || sqlErr.Number != 40613 && sqlErr.Number != 49920 {
+	if !errors.As(err, &sqlErr) || sqlErr.Number != 49920 {
 		t.Fatalf("error %v does not carry the last SQL error", err)
 	}
 	// 5 + 10 + 20 + 40 seconds fit in two minutes; the next delay would not.

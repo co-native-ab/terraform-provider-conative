@@ -113,6 +113,9 @@ func (c *retryConnector) Connect(ctx context.Context) (driver.Conn, error) {
 			return nil, err
 		}
 		delay, ok := azuresql.NextDelay(attempt, c.now().Sub(start), c.budget)
+		if !ok && attempt == 0 {
+			return nil, err // nothing was retried: report the error as it is
+		}
 		if !ok {
 			return nil, fmt.Errorf("giving up after %d attempts over %s: %w", attempt+1, c.now().Sub(start).Round(time.Second), err)
 		}

@@ -110,3 +110,55 @@ func TestClosedProxyRefusesConnections(t *testing.T) {
 		t.Error("connected to a closed proxy")
 	}
 }
+
+// FailLogins answers sign-ins with the chosen error number, only after the token has
+// been accepted, and for the chosen number of sign-ins.
+func TestFailLoginsInjectsErrorAfterTokenCheck(t *testing.T) {
+	t.Parallel()
+
+	certs, err := acctest.NewCerts(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "the-right-token"
+	proxy, err := tdsproxy.Start(tdsproxy.Config{
+		ListenAddr: "127.0.0.1:0", Certificate: certs.Server, Token: token, UpstreamAddr: "127.0.0.1:1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	proxy.FailLogins(40613, 1)
+
+	ping := func(tok string) error {
+		cfg := msdsn.Config{
+			Host: "127.0.0.1", Port: mustPort(t, proxy.Addr()), Database: "master",
+			Encryption:  msdsn.EncryptionRequired,
+			TLSConfig:   &tls.Config{RootCAs: certs.CAPool, ServerName: "localhost", MinVersion: tls.VersionTLS12},
+			DialTimeout: 5 * time.Second, DisableRetry: true, Protocols: []string{"tcp"},
+			Encoding: msdsn.EncodeParameters{Timezone: time.UTC},
+		}
+		connector, err := mssql.NewSecurityTokenConnector(cfg, func(context.Context) (string, error) { return tok, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		db := sql.OpenDB(connector)
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return db.PingContext(ctx)
+	}
+
+	// A wrong token is still refused with 18456 and does not use up the injected failure.
+	var sqlErr mssql.Error
+	if err := ping("wrong"); !errors.As(err, &sqlErr) || sqlErr.Number != 18456 {
+		t.Errorf("wrong token: %v, want 18456", err)
+	}
+	if err := ping(token); !errors.As(err, &sqlErr) || sqlErr.Number != 40613 {
+		t.Errorf("right token: %v, want the injected 40613", err)
+	}
+	// The injected failure is spent: the next sign-in reaches the (unreachable) upstream.
+	if err := ping(token); !errors.As(err, &sqlErr) || sqlErr.Number != 18456 {
+		t.Errorf("after the injected failure: %v, want the upstream failure to surface as 18456", err)
+	}
+}

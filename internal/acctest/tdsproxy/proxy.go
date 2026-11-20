@@ -37,6 +37,10 @@ type Proxy struct {
 	ln     net.Listener
 	reject atomic.Bool
 
+	failMu     sync.Mutex
+	failNumber int32
+	failLeft   int
+
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	closed bool
@@ -60,6 +64,27 @@ func (p *Proxy) Addr() string { return p.ln.Addr().String() }
 
 // RejectAll makes the proxy refuse every sign-in with error 18456 while on is true.
 func (p *Proxy) RejectAll(on bool) { p.reject.Store(on) }
+
+// FailLogins makes the proxy answer the next count sign-ins with a SQL Server error of
+// the given number, after the token has been accepted, as a server does while it is
+// briefly unavailable. It lets tests exercise how a client reacts to a transient
+// error. It changes nothing else about the proxy: no error text or behaviour of any
+// particular service is emulated.
+func (p *Proxy) FailLogins(number int32, count int) {
+	p.failMu.Lock()
+	p.failNumber, p.failLeft = number, count
+	p.failMu.Unlock()
+}
+
+func (p *Proxy) injectedFailure() (int32, bool) {
+	p.failMu.Lock()
+	defer p.failMu.Unlock()
+	if p.failLeft <= 0 {
+		return 0, false
+	}
+	p.failLeft--
+	return p.failNumber, true
+}
 
 // Close stops listening and drops every connection.
 func (p *Proxy) Close() error {
@@ -132,6 +157,11 @@ func (p *Proxy) handle(client net.Conn) {
 	packetSize := int(login.PacketSize)
 	if !p.tokenAccepted(login) {
 		p.refuse(secure, packetSize)
+		return
+	}
+
+	if number, ok := p.injectedFailure(); ok {
+		_ = writeMessage(secure, typeReply, loginFailure(number, fmt.Sprintf("The test proxy answered this sign-in with error %d.", number)), packetSize)
 		return
 	}
 

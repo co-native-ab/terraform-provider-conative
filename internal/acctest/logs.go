@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 	"unicode/utf16"
 )
@@ -19,7 +21,6 @@ func EnableTraceLogs(t *testing.T, dir string) string {
 	t.Setenv("TF_LOG_SDK", "TRACE")
 	t.Setenv("TF_LOG_PROVIDER", "TRACE")
 	t.Setenv("TF_ACC_LOG_PATH", path)
-	t.Setenv("TF_LOG_PATH", path)
 	return path
 }
 
@@ -63,4 +64,35 @@ func secretForms(secret string) map[string][]byte {
 		"base64":       []byte(base64.StdEncoding.EncodeToString([]byte(secret))),
 		"base64 (url)": []byte(base64.RawURLEncoding.EncodeToString([]byte(secret))),
 	}
+}
+
+// AssertNoSecretInFiles walks dir and fails the test if a regular file whose base name
+// matches one of names holds the secret. It returns the number of files it searched,
+// so callers can make sure the check was not vacuous.
+func AssertNoSecretInFiles(t *testing.T, dir, secret string, names ...string) int {
+	t.Helper()
+	searched := 0
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		for _, n := range names {
+			if ok, _ := filepath.Match(n, d.Name()); !ok {
+				continue
+			}
+			data, err := os.ReadFile(path) //nolint:gosec // walking a directory the test created
+			if err != nil {
+				return err
+			}
+			searched++
+			if ContainsSecret(data, secret) {
+				t.Errorf("%s contains the secret", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return searched
 }
