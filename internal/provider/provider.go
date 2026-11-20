@@ -165,6 +165,7 @@ func (p *conativeProvider) Resources(_ context.Context) []func() resource.Resour
 	return []func() resource.Resource{
 		NewDatabaseUserResource,
 		NewDatabaseRoleMemberResource,
+		NewDatabasePermissionResource,
 	}
 }
 

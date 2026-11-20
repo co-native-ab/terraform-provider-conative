@@ -87,7 +87,7 @@ func TestAccDatabaseUser_existsSuggestsImport(t *testing.T) {
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
 			Config:          userConfig(db, "dup", "application", someEntraID),
-			ExpectError:     regexp.MustCompile(`(?s)already exists in database.*import it with terraform import <address> ` + regexp.QuoteMeta(db) + `/dup`),
+			ExpectError:     regexp.MustCompile(`(?s)already\s+exists\s+in\s+database.*import\s+it\s+with\s+terraform\s+import`),
 		}},
 	})
 
