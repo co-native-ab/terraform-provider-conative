@@ -1,0 +1,19 @@
+---
+page_title: "{{.ProviderShortName}} Provider"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.ProviderShortName}} Provider
+
+{{.Description | trimspace}}
+
+See the [Azure SQL guide](guides/azure-sql-entra-principals) for how the access token, user creation,
+import and retries work.
+
+## Example Usage
+
+{{tffile "examples/provider/provider.tf"}}
+
+{{.SchemaMarkdown | trimspace}}
