@@ -164,6 +164,7 @@ func newAzureSQL(s azureSQLModel, resp *provider.ConfigureResponse) *azureSQL {
 func (p *conativeProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewDatabaseUserResource,
+		NewDatabaseRoleMemberResource,
 	}
 }
 

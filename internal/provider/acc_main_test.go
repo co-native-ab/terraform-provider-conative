@@ -49,6 +49,17 @@ func newDatabase(t *testing.T) string {
 	return name
 }
 
+// newDatabaseWithName creates an empty database whose name is the given text followed
+// by a unique suffix, for tests that need unusual characters in database names.
+func newDatabaseWithName(t *testing.T, prefix string) string {
+	t.Helper()
+	name := fmt.Sprintf("%s_%d", prefix, databaseCounter.Add(1))
+	if err := acc.Container.CreateDatabase(name); err != nil {
+		t.Fatalf("cannot create database %s: %v", name, err)
+	}
+	return name
+}
+
 // tokenVariables supplies the access token to the ephemeral variable the test
 // configurations declare.
 func tokenVariables() config.Variables {
