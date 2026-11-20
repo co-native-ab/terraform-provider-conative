@@ -1,0 +1,72 @@
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - depguard
+    - errorlint
+    - forbidigo
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+  settings:
+    depguard:
+      rules:
+        pure-core:
+          list-mode: lax
+          files:
+            - "**/internal/azuresql/*.go"
+            - "!**/internal/azuresql/*_test.go"
+          deny:
+            - pkg: database/sql
+              desc: the core is pure; database access belongs in internal/azuresql/sqlclient
+            - pkg: net
+              desc: the core is pure; network access belongs in internal/azuresql/sqlclient
+            - pkg: os
+              desc: the core is pure; file-system and environment access are not allowed
+            - pkg: github.com/microsoft/go-mssqldb
+              desc: the driver is used only by internal/azuresql/sqlclient
+        no-sign-in-libraries:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: github.com/Azure
+              desc: the provider never signs in; the caller supplies the access token
+            - pkg: github.com/AzureAD
+              desc: the provider never signs in; the caller supplies the access token
+    forbidigo:
+      forbid:
+        - pattern: ^time\.(Now|Sleep|After|Since|Until)$
+          msg: the core is pure; the clock belongs to internal/azuresql/sqlclient
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: unused-parameter
+          disabled: true
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # The clock restriction applies to the pure core only.
+      - path: internal/azuresql/sqlclient/
+        linters: [forbidigo]
+      - path: internal/provider/
+        linters: [forbidigo]
+      - path: internal/acctest/
+        linters: [forbidigo]
+      - path: _test\.go
+        linters: [forbidigo, gosec]
+
+formatters:
+  enable:
+    - gofmt
