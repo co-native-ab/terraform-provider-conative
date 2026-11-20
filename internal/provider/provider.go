@@ -162,7 +162,9 @@ func newAzureSQL(s azureSQLModel, resp *provider.ConfigureResponse) *azureSQL {
 }
 
 func (p *conativeProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		NewDatabaseUserResource,
+	}
 }
 
 func (p *conativeProvider) DataSources(_ context.Context) []func() datasource.DataSource {
