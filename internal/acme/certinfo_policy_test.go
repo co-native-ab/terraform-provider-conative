@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,13 @@ func TestInspectForImport(t *testing.T) {
 		}
 	}
 
+	// A certificate without a subject common name is adopted; every DNS name is then an
+	// alternative name.
+	info, err := InspectForImport(leaf(t, leafOptions{dns: []string{"example.com", "*.example.com"}}))
+	if err != nil || info.CommonName != "" || !slices.Equal(info.SANs, []string{"*.example.com", "example.com"}) {
+		t.Errorf("no common name: %+v %v", info, err)
+	}
+
 	rsa1024, _ := rsa.GenerateKey(rand.Reader, 1024) //nolint:gosec // a small key is the point of the test
 	p224, _ := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
 	_, edKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -116,7 +124,7 @@ func TestInspectForImport(t *testing.T) {
 		o    leafOptions
 		want string
 	}{
-		"no common name":  {leafOptions{dns: []string{"example.com"}}, "no subject common name"},
+		"no names at all": {leafOptions{}, "neither a subject common name nor a DNS name"},
 		"cn not in names": {leafOptions{cn: "example.com", dns: []string{"www.example.com"}}, "not among"},
 		"ip san":          {leafOptions{cn: "example.com", dns: []string{"example.com"}, ips: []net.IP{net.ParseIP("192.0.2.1")}}, "not a DNS name"},
 		"single label":    {leafOptions{cn: "example", dns: []string{"example"}}, "not a valid DNS name"},

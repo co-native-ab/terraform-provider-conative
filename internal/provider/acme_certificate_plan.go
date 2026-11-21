@@ -299,7 +299,16 @@ func decideOrder(now time.Time, plan, state acmeCertificateModel) (bool, string)
 	if err != nil {
 		return true, "the expiry of the current certificate is not known"
 	}
-	changed := acme.NamesChanged(plan.CommonName.ValueString(), setStrings(plan.SANs), state.CommonName.ValueString(), setStrings(state.SANs)) ||
+	var namesChanged bool
+	if state.CommonName.IsNull() {
+		// A certificate without a subject common name (adopted by an import): all its DNS
+		// names are in subject_alternative_names, and the configured common name and
+		// alternative names have to make up the same set.
+		namesChanged = acme.NamesChangedWithoutCommonName(plan.CommonName.ValueString(), setStrings(plan.SANs), setStrings(state.SANs))
+	} else {
+		namesChanged = acme.NamesChanged(plan.CommonName.ValueString(), setStrings(plan.SANs), state.CommonName.ValueString(), setStrings(state.SANs))
+	}
+	changed := namesChanged ||
 		acme.KeyTypeChanged(plan.KeyType.ValueString(), state.KeyType.ValueString()) ||
 		authorityChanged(plan.RegistrationID, state.RegistrationID)
 	return acme.NeedsOrder(now, notAfter, plan.MinDays.ValueInt64(), state.Version.ValueString(), state.IssuedVersion.ValueString(), changed)

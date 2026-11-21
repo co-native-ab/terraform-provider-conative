@@ -380,6 +380,11 @@ func (r *acmeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 // namesSet turns read-back alternative names into a set. When the certificate has none,
 // the form already held (null or empty) is kept.
 func namesSet(names []string, current types.Set) types.Set {
+	if info.CommonName == "" {
+		// The certificate has no subject common name (and the configuration, if any, does
+		// not name one that the certificate carries): record none.
+		state.CommonName = types.StringNull()
+	}
 	if len(names) == 0 {
 		if current.IsNull() || current.IsUnknown() || len(current.Elements()) == 0 {
 			return current

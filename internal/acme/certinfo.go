@@ -36,7 +36,10 @@ func Inspect(der []byte) (Info, error) {
 		return Info{}, fmt.Errorf("the certificate cannot be parsed: %w", err)
 	}
 	cn := strings.ToLower(cert.Subject.CommonName)
-	seen := map[string]bool{cn: true}
+	seen := map[string]bool{}
+	if cn != "" {
+		seen[cn] = true
+	}
 	var sans []string
 	for _, n := range cert.DNSNames {
 		n = strings.ToLower(n)
@@ -59,19 +62,20 @@ func Inspect(der []byte) (Info, error) {
 
 // InspectForImport is the strict form used when an existing certificate is adopted. It
 // refuses a certificate whose names or key the resource could not represent, with a
-// reason that says what is wrong.
+// reason that says what is wrong. A certificate without a subject common name is
+// accepted: Info.CommonName is then empty and SANs holds every DNS name.
 func InspectForImport(der []byte) (Info, error) {
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		return Info{}, fmt.Errorf("the certificate cannot be parsed: %w", err)
 	}
-	if cert.Subject.CommonName == "" {
-		return Info{}, fmt.Errorf("the certificate has no subject common name")
-	}
 	if len(cert.IPAddresses) > 0 || len(cert.EmailAddresses) > 0 || len(cert.URIs) > 0 {
 		return Info{}, fmt.Errorf("the certificate has a subject alternative name that is not a DNS name (IP address, e-mail address or URI)")
 	}
 	cn := strings.ToLower(cert.Subject.CommonName)
+	if cn == "" && len(cert.DNSNames) == 0 {
+		return Info{}, fmt.Errorf("the certificate has neither a subject common name nor a DNS name")
+	}
 	found := false
 	for _, n := range cert.DNSNames {
 		n = strings.ToLower(n)
@@ -82,11 +86,13 @@ func InspectForImport(der []byte) (Info, error) {
 			found = true
 		}
 	}
-	if err := ValidateIdentifier(cn); err != nil {
-		return Info{}, fmt.Errorf("the common name is not a valid DNS name: %w", err)
-	}
-	if !found {
-		return Info{}, fmt.Errorf("the common name %q is not among the certificate's DNS names", cn)
+	if cn != "" {
+		if err := ValidateIdentifier(cn); err != nil {
+			return Info{}, fmt.Errorf("the common name is not a valid DNS name: %w", err)
+		}
+		if !found {
+			return Info{}, fmt.Errorf("the common name %q is not among the certificate's DNS names", cn)
+		}
 	}
 	info, err := Inspect(der)
 	if err != nil {

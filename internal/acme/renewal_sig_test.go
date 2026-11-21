@@ -110,3 +110,17 @@ func pad(b []byte, size int) []byte {
 	copy(out[size-len(b):], b)
 	return out
 }
+
+func TestNamesChangedWithoutCommonName(t *testing.T) {
+	t.Parallel()
+	certNames := []string{"*.example.com", "example.com"}
+	if NamesChangedWithoutCommonName("example.com", []string{"*.example.com"}, certNames) {
+		t.Error("the same names, split into a common name and alternative names, are no change")
+	}
+	if NamesChangedWithoutCommonName("*.example.com", []string{"example.com", "example.com"}, certNames) {
+		t.Error("order and duplicates do not matter")
+	}
+	if !NamesChangedWithoutCommonName("example.com", nil, certNames) || !NamesChangedWithoutCommonName("example.com", []string{"*.example.com", "www.example.com"}, certNames) {
+		t.Error("a name that is added or missing is a change")
+	}
+}

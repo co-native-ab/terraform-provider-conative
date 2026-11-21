@@ -241,7 +241,8 @@ func TestAccACMECertificate_importRefused(t *testing.T) {
 		}
 	}
 	cases := map[string]refusal{
-		"no common name": {with(func(o *keyvaultfake.ImportOptions) { o.CommonName = "" }), `no\s+subject\s+common\s+name`},
+		"no names at all": {with(func(o *keyvaultfake.ImportOptions) { o.CommonName, o.DNSNames = "", nil }),
+			`neither\s+a\s+subject\s+common\s+name\s+nor\s+a\s+DNS\s+name`},
 		"common name not among names": {with(func(o *keyvaultfake.ImportOptions) { o.DNSNames = []string{"www.example.com"} }),
 			`not\s+among\s+the\s+certificate's\s+DNS\s+names`},
 		"ip address": {with(func(o *keyvaultfake.ImportOptions) { o.IPAddresses = ipList("192.0.2.1") }), `not\s+a\s+DNS\s+name`},
@@ -488,4 +489,91 @@ func TestAccACMECertificate_importVaultURLSpellings(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A certificate without a subject common name can be imported: common_name is null after
+// the import, and a configuration whose common name and alternative names make up the
+// certificate's DNS names is a state-only update.
+func TestAccACMECertificate_importWithoutCommonName(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	matching := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	other := certOptions{SANs: []string{"*.example.com", "www.example.com"}, Blocks: cloudflareOnly}
+	forget := acmeProviderConfig() + f.registrationHCL(`email = "certificates@example.com"`) + `
+removed {
+  from = conative_acme_certificate.c
+  lifecycle {
+    destroy = false
+  }
+}
+`
+	var mark acctest.Mark
+	var version string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				PreConfig:       func() { acc.ACME.OmitCommonName(true) },
+				ConfigVariables: acmeVariables(), Config: f.config(matching),
+				Check: func(s *terraform.State) error {
+					a, err := certAttrs(s)
+					version = a["version"]
+					return err
+				},
+			},
+			{ConfigVariables: acmeVariables(), Config: forget}, // state rm
+			{
+				PreConfig:       markNow(&mark),
+				ConfigVariables: acmeVariables(), Config: f.config(matching),
+				ResourceName: certAddr, ImportState: true, ImportStatePersist: true, ImportStateId: importID(f.Cert),
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					for _, st := range states {
+						if st.Attributes["certificate_name"] != f.Cert {
+							continue
+						}
+						if v, ok := st.Attributes["common_name"]; ok {
+							return fmt.Errorf("common_name must be null after the import, got %q", v)
+						}
+						if st.Attributes["subject_alternative_names.#"] != "2" {
+							return fmt.Errorf("the alternative names are %q, want both DNS names", st.Attributes["subject_alternative_names.#"])
+						}
+						if st.Attributes["version"] != version {
+							return fmt.Errorf("the imported version is %s, want %s", st.Attributes["version"], version)
+						}
+						return nil
+					}
+					return fmt.Errorf("the certificate is not among the imported states")
+				},
+			},
+			{
+				// The names match as one set: a state-only update that writes nothing.
+				PreConfig:       markNow(&mark),
+				ConfigVariables: acmeVariables(), Config: f.config(matching),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate),
+					plancheck.ExpectKnownValue(certAddr, tfjsonpath.New("version"), knownvalue.NotNull()),
+				}},
+				Check: resource.ComposeTestCheckFunc(
+					noWritesSince(&mark),
+					func(s *terraform.State) error {
+						a, err := certAttrs(s)
+						if err == nil && a["version"] != version {
+							err = fmt.Errorf("version %s, want the imported %s", a["version"], version)
+						}
+						return err
+					},
+					resource.TestCheckResourceAttr(certAddr, "common_name", "example.com"),
+					resource.TestCheckResourceAttr(certAddr, "subject_alternative_names.#", "1"),
+				),
+			},
+			{ConfigVariables: acmeVariables(), Config: f.config(matching), PlanOnly: true},
+			{
+				// Other names are a change that orders a new version.
+				ConfigVariables: acmeVariables(), Config: f.config(other),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectUnknownValue(certAddr, tfjsonpath.New("version")),
+				}},
+			},
+		},
+	})
 }

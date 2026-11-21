@@ -49,3 +49,10 @@ func sortedSet(in []string) []string {
 	slices.Sort(out)
 	return slices.Compact(out)
 }
+
+// NamesChangedWithoutCommonName is NamesChanged for a certificate that has no subject
+// common name: the configured common name and alternative names, taken together as one
+// set, are compared with all the DNS names of the certificate.
+func NamesChangedWithoutCommonName(cfgCN string, cfgSANs []string, certNames []string) bool {
+	return !slices.Equal(sortedSet(append([]string{cfgCN}, cfgSANs...)), sortedSet(certNames))
+}
