@@ -1,5 +1,8 @@
 # Terraform Provider: conative
 
+[![Terraform Registry](https://img.shields.io/badge/Terraform-Registry-blue.svg)](https://registry.terraform.io/providers/co-native-ab/conative)
+[![License](https://img.shields.io/github/license/co-native-ab/terraform-provider-conative)](LICENSE)
+
 A Terraform provider for managing resources that the major cloud providers do not cover, or do not cover
 well.
 
@@ -41,7 +44,8 @@ terraform {
       version = "~> 0.1"
     }
     conative = {
-      source = "co-native-ab/conative"
+      source  = "co-native-ab/conative"
+      version = "~> 0.1"
     }
   }
 }
