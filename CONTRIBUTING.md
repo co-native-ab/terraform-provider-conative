@@ -46,6 +46,26 @@ How they work:
   as stand-ins for reads, imports, role memberships and permissions. The exact statement that creates an
   Entra user is covered by unit tests.
 
+### ACME tests
+
+The ACME acceptance tests need no Docker, no network and no account. They run the provider against fakes
+that live in the repository under `internal/acctest`:
+
+- `acmefake`: an ACME certificate authority (RFC 8555) with accounts (including lookup by key), orders,
+  authorizations, DNS-01 validation, finalize with a signing request, issuance from a test authority and
+  revocation. It validates a challenge by reading the TXT records from the shared DNS store.
+- `keyvaultfake`: Key Vault keys (sign for RSA and EC) and certificates (create with the issuer `Unknown`,
+  pending request with a signing request, merge, versions, delete).
+- `azurednsfake` and `cloudflarefake`: the TXT record parts of the Azure DNS Resource Manager API and the
+  Cloudflare API. Both write to the same `dnsstore` that the certificate authority reads.
+
+Every fake serves HTTPS on a loopback port with a certificate from a certificate authority generated for the
+run, trusted through `SSL_CERT_FILE` like the SQL proxy above, so they also need Linux. The provider has no
+setting that weakens certificate validation; the tests inject the base URLs and the DNS propagation check
+instead. Each fake keeps a journal of the requests it received, which the tests use to show that a plan or a
+state-only update wrote nothing, and the tests search the state, saved plans and trace logs for every token
+and private key the fakes hold.
+
 If a run is killed, a container named `conative-acc-*` can be left behind; remove it with
 `docker rm -f`.
 
@@ -86,8 +106,11 @@ goreleaser release --snapshot --clean --skip=sign,publish
 
 ## Dependencies
 
-The provider depends on the Terraform plugin framework, the Microsoft SQL Server driver for Go and the
-standard library. Justify every new dependency in the pull request. Nothing that signs in to Microsoft Entra
+The provider depends on the Terraform plugin framework, the Microsoft SQL Server driver for Go,
+`golang.org/x/crypto` and the standard library. `golang.org/x/crypto/acme` is the RFC 8555 client,
+maintained by the Go project and BSD-licensed; only the `internal/acme/issuer` package imports it, and
+`acme/autocert` must not be used. The Key Vault, Azure DNS and Cloudflare clients are plain HTTP on purpose,
+to avoid pulling in the Azure and Cloudflare SDKs. Justify every new dependency in the pull request. Nothing that signs in to Microsoft Entra
 ID may be added: the caller supplies the access token, and CI fails if such a package appears in the build.
 
 ## Code guidelines
@@ -95,6 +118,9 @@ ID may be added: the caller supplies the access token, and CI fails if such a pa
 - Decisions are pure functions in `internal/azuresql`: building statements, deriving security identifiers,
   parsing import IDs, validating names, roles and permissions, and mapping catalog rows. They do no
   network, database, file-system or clock access. Lint rules enforce it.
+- Decisions for the ACME resources (name routing, record names, IDs, key types, the renewal decision,
+  inspecting certificates) are pure functions in `internal/acme`, the second pure core; the clients for
+  Key Vault, Azure DNS, Cloudflare and the DNS check live in subpackages and make no decisions.
 - Talking to the database lives in `internal/azuresql/sqlclient` and makes no decisions.
 - Identifiers in T-SQL are always bracket-quoted with `]` doubled, values are always passed as parameters,
   and role and permission names are checked against allowlists before a statement is built. Add a test
