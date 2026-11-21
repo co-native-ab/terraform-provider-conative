@@ -72,6 +72,18 @@ produces.
 - Keep decisions that a reader needs in the repository: in the code, in `docs/`, or in the pull request
   description.
 
+## Releases
+
+Maintainers cut a release by pushing a signed, annotated tag `vX.Y.Z` on `main`. The tag is the only place
+the version is written. The release workflow builds the archives for every platform the Terraform Registry
+supports with GoReleaser, signs the checksums file and publishes a GitHub release. Merging a pull request
+releases nothing. To check the release configuration locally:
+
+```shell
+goreleaser check
+goreleaser release --snapshot --clean --skip=sign,publish
+```
+
 ## Dependencies
 
 The provider depends on the Terraform plugin framework, the Microsoft SQL Server driver for Go and the
