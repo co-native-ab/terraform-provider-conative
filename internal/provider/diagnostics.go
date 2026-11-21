@@ -12,8 +12,15 @@ import (
 // connection when the provider has none.
 const errMissingSettings = "the provider's azuresql settings (server, access_token) are required for this resource"
 
-// azureSQL is what Configure hands to resources and data sources: a client, or the
-// reason there is none.
+// providerData is what Configure hands to resources and data sources: the settings of
+// each area, or the reason an area has none.
+type providerData struct {
+	azuresql *azureSQL
+	acme     *acmeAccess
+}
+
+// azureSQL is the Azure SQL area of the provider data: a client, or the reason there is
+// none.
 type azureSQL struct {
 	client *sqlclient.Client
 	reason string
@@ -23,8 +30,12 @@ type azureSQL struct {
 // It is for create, read, update, delete and data source reads, which only run after
 // the provider is configured; a missing client there is an error, never a silent skip.
 func requireClient(data any, diags *diag.Diagnostics) *sqlclient.Client {
-	a, ok := data.(*azureSQL)
-	if !ok || a == nil {
+	pd, ok := data.(*providerData)
+	var a *azureSQL
+	if ok && pd != nil {
+		a = pd.azuresql
+	}
+	if a == nil {
 		diags.AddError("Azure SQL settings are required", "the provider was not configured for this operation")
 		return nil
 	}

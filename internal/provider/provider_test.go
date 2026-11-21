@@ -110,10 +110,14 @@ func unknownConfig(t *testing.T, server, token tftypes.Value) provider.Configure
 	objType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{
 		"server": tftypes.String, "access_token": tftypes.String, "retry_timeout": tftypes.String,
 	}}
-	root := tftypes.Object{AttributeTypes: map[string]tftypes.Type{"azuresql": objType}}
+	acmeType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{
+		"key_vault_access_token": tftypes.String, "resource_manager_access_token": tftypes.String,
+	}}
+	root := tftypes.Object{AttributeTypes: map[string]tftypes.Type{"azuresql": objType, "acme": acmeType}}
 	return provider.ConfigureRequest{Config: tfsdk.Config{
 		Schema: resp.Schema,
 		Raw: tftypes.NewValue(root, map[string]tftypes.Value{
+			"acme": tftypes.NewValue(acmeType, nil),
 			"azuresql": tftypes.NewValue(objType, map[string]tftypes.Value{
 				"server": server, "access_token": token, "retry_timeout": tftypes.NewValue(tftypes.String, nil),
 			}),
@@ -137,7 +141,7 @@ func TestConfigureWithUnknownValuesDoesNotConnect(t *testing.T) {
 		if resp.Diagnostics.HasError() {
 			t.Errorf("%s: Configure failed: %v", name, resp.Diagnostics)
 		}
-		data, _ := resp.ResourceData.(*azureSQL)
+		data := azureSQLOf(resp.ResourceData)
 		if data == nil || data.client != nil || data.reason == "" {
 			t.Errorf("%s: want an unusable configuration with a reason, got %+v", name, resp.ResourceData)
 		}
@@ -145,7 +149,7 @@ func TestConfigureWithUnknownValuesDoesNotConnect(t *testing.T) {
 
 	var resp provider.ConfigureResponse
 	New("test")().Configure(context.Background(), unknownConfig(t, known, token), &resp)
-	data, _ := resp.ResourceData.(*azureSQL)
+	data := azureSQLOf(resp.ResourceData)
 	if resp.Diagnostics.HasError() || data == nil || data.client == nil {
 		t.Errorf("known settings: want a client, got %+v, %v", resp.ResourceData, resp.Diagnostics)
 	}
@@ -156,7 +160,8 @@ func TestRequireClientFailsClosed(t *testing.T) {
 
 	for name, data := range map[string]any{
 		"no provider data":   nil,
-		"no settings":        &azureSQL{reason: "not configured"},
+		"no settings":        &providerData{azuresql: &azureSQL{reason: "not configured"}},
+		"no azuresql area":   &providerData{},
 		"unexpected payload": "x",
 	} {
 		var diags diag.Diagnostics
@@ -164,4 +169,13 @@ func TestRequireClientFailsClosed(t *testing.T) {
 			t.Errorf("%s: client %v, errors %v; want no client and an error", name, c, diags.HasError())
 		}
 	}
+}
+
+// azureSQLOf returns the Azure SQL part of the data Configure produced.
+func azureSQLOf(data any) *azureSQL {
+	pd, _ := data.(*providerData)
+	if pd == nil {
+		return nil
+	}
+	return pd.azuresql
 }
