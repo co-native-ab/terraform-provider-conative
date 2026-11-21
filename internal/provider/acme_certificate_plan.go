@@ -147,12 +147,15 @@ func parseDNSBlocks(az, cf types.List) dnsBlocks {
 
 // ---- key_vault_url ------------------------------------------------------------------
 
-// vaultURLReplace requires replacement only when the vault differs: another spelling of
-// the same URL (case of the host, a trailing slash) is not a change of vault.
+// vaultURLReplace keeps the value in state when the configuration names the same vault
+// in another spelling (the case of the host, a trailing slash), so that the plan shows no
+// change; Terraform accepts a planned value that equals the prior value for that reason.
+// It requires replacement only when the vault differs. The attribute's type
+// (vaultURLType) does the same after create, update and read.
 type vaultURLReplace struct{}
 
 func (vaultURLReplace) Description(context.Context) string {
-	return "Changing the vault replaces the resource; another spelling of the same URL does not."
+	return "Changing the vault replaces the resource; another spelling of the same URL does not change anything."
 }
 
 func (m vaultURLReplace) MarkdownDescription(ctx context.Context) string { return m.Description(ctx) }
@@ -161,7 +164,12 @@ func (vaultURLReplace) PlanModifyString(_ context.Context, req planmodifier.Stri
 	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() || req.StateValue.IsNull() {
 		return
 	}
-	if req.PlanValue.IsUnknown() || !acme.VaultURLEqual(req.StateValue.ValueString(), req.PlanValue.ValueString()) {
+	switch {
+	case req.PlanValue.IsUnknown():
+		resp.RequiresReplace = true
+	case acme.VaultURLEqual(req.StateValue.ValueString(), req.PlanValue.ValueString()):
+		resp.PlanValue = req.StateValue
+	default:
 		resp.RequiresReplace = true
 	}
 }

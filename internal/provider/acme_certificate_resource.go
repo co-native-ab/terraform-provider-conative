@@ -50,23 +50,23 @@ type acmeCertificateResource struct {
 }
 
 type acmeCertificateModel struct {
-	ID              types.String `tfsdk:"id"`
-	SecretID        types.String `tfsdk:"secret_id"`
-	RegistrationID  types.String `tfsdk:"registration_id"`
-	KeyVaultURL     types.String `tfsdk:"key_vault_url"`
-	CertificateName types.String `tfsdk:"certificate_name"`
-	CommonName      types.String `tfsdk:"common_name"`
-	SANs            types.Set    `tfsdk:"subject_alternative_names"`
-	KeyType         types.String `tfsdk:"key_type"`
-	MinDays         types.Int64  `tfsdk:"min_days_remaining"`
-	RevokeOnDestroy types.Bool   `tfsdk:"revoke_on_destroy"`
-	AzureDNS        types.List   `tfsdk:"azure_dns"`
-	Cloudflare      types.List   `tfsdk:"cloudflare"`
-	Version         types.String `tfsdk:"version"`
-	IssuedVersion   types.String `tfsdk:"issued_version"`
-	CertificatePEM  types.String `tfsdk:"certificate_pem"`
-	NotAfter        types.String `tfsdk:"not_after"`
-	Thumbprint      types.String `tfsdk:"thumbprint"`
+	ID              types.String  `tfsdk:"id"`
+	SecretID        types.String  `tfsdk:"secret_id"`
+	RegistrationID  types.String  `tfsdk:"registration_id"`
+	KeyVaultURL     vaultURLValue `tfsdk:"key_vault_url"`
+	CertificateName types.String  `tfsdk:"certificate_name"`
+	CommonName      types.String  `tfsdk:"common_name"`
+	SANs            types.Set     `tfsdk:"subject_alternative_names"`
+	KeyType         types.String  `tfsdk:"key_type"`
+	MinDays         types.Int64   `tfsdk:"min_days_remaining"`
+	RevokeOnDestroy types.Bool    `tfsdk:"revoke_on_destroy"`
+	AzureDNS        types.List    `tfsdk:"azure_dns"`
+	Cloudflare      types.List    `tfsdk:"cloudflare"`
+	Version         types.String  `tfsdk:"version"`
+	IssuedVersion   types.String  `tfsdk:"issued_version"`
+	CertificatePEM  types.String  `tfsdk:"certificate_pem"`
+	NotAfter        types.String  `tfsdk:"not_after"`
+	Thumbprint      types.String  `tfsdk:"thumbprint"`
 }
 
 func (m acmeCertificateModel) object() string {
@@ -106,6 +106,7 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 				MarkdownDescription: "The vault URL, for example `https://example.vault.azure.net/`. The host must end in " +
 					"`.vault.azure.net`; access tokens are sent to no other host. Changing it to " +
 					"another vault replaces the resource; a different spelling of the same URL does not.",
+				CustomType:    vaultURLType{},
 				Required:      true,
 				Validators:    []validator.String{checkString("must be a Key Vault URL such as https://example.vault.azure.net/", validateVaultURL)},
 				PlanModifiers: []planmodifier.String{vaultURLReplace{}},

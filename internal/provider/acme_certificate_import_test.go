@@ -51,12 +51,12 @@ func TestAccACMECertificate_import(t *testing.T) {
 				ImportStateVerifyIgnore: ignoreUnreadable,
 			},
 			{
-				// Another spelling of the same vault URL is a state-only update, never a replacement.
+				// Another spelling of the same vault URL is no change at all.
 				PreConfig:       markNow(&mark),
 				ConfigVariables: acmeVariables(),
 				Config:          f.config(slash),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-					plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate),
+					plancheck.ExpectEmptyPlan(),
 				}},
 				Check: noWritesSince(&mark),
 			},
@@ -156,6 +156,7 @@ func TestAccACMECertificate_importExisting(t *testing.T) {
 				Config:          f.config(matching),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate),
+					attributeUnchanged{certAddr, "key_vault_url"},
 					onlyKnown("version"), onlyKnown("issued_version"), onlyKnown("certificate_pem"),
 					onlyKnown("not_after"), onlyKnown("thumbprint"),
 				}},
@@ -451,4 +452,40 @@ func TestAccACMECertificate_destroyAfterImport(t *testing.T) {
 			},
 		})
 	})
+}
+
+// After an import, either spelling of the vault URL leaves key_vault_url unchanged.
+func TestAccACMECertificate_importVaultURLSpellings(t *testing.T) {
+	accPreCheck(t)
+	for name, spell := range map[string]func(string) string{
+		"without a slash": func(u string) string { return u },
+		"with a slash":    func(u string) string { return u + "/" },
+		"host in capitals": func(u string) string {
+			return strings.Replace(u, "fake.vault.azure.net", "FAKE.Vault.AZURE.net", 1) + "/"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newACMEFixture(t, "P256")
+			var imported string
+			tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, VaultURL: spell(acc.KeyVault.URL)}
+			resource.Test(t, resource.TestCase{
+				ProtoV6ProviderFactories: newTestProviderFactories(),
+				Steps: []resource.TestStep{
+					{ConfigVariables: acmeVariables(), Config: registrationOnly(f)},
+					{
+						PreConfig:       existingCert(t, f, existingOptions(), &imported),
+						ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+						ResourceName: certAddr, ImportState: true, ImportStatePersist: true, ImportStateId: importID(f.Cert),
+					},
+					{
+						ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+						ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+							attributeUnchanged{certAddr, "key_vault_url"},
+						}},
+					},
+					{ConfigVariables: acmeVariables(), Config: f.config(tweaks), PlanOnly: true},
+				},
+			})
+		})
+	}
 }

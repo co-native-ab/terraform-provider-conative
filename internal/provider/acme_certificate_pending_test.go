@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +153,47 @@ func TestAccACMERegistration_refreshWithoutContacts(t *testing.T) {
 				Check: resource.TestCheckResourceAttr(addr, "email", "a@example.com"),
 			},
 			{ConfigVariables: acmeVariables(), Config: cfg, PlanOnly: true},
+		},
+	})
+}
+
+// attributeUnchanged fails when the plan changes an attribute of a resource.
+type attributeUnchanged struct {
+	address, attribute string
+}
+
+func (c attributeUnchanged) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	for _, rc := range req.Plan.ResourceChanges {
+		if rc.Address != c.address || rc.Change == nil {
+			continue
+		}
+		before, _ := rc.Change.Before.(map[string]any)
+		after, _ := rc.Change.After.(map[string]any)
+		if before[c.attribute] != after[c.attribute] {
+			resp.Error = fmt.Errorf("%s.%s changes from %v to %v", c.address, c.attribute, before[c.attribute], after[c.attribute])
+		}
+		return
+	}
+	resp.Error = fmt.Errorf("%s is not in the plan", c.address)
+}
+
+func TestAccACMECertificate_vaultURLSpellingIsNoChange(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	plain := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	slash, upper := plain, plain
+	slash.VaultURL = acc.KeyVault.URL + "/"
+	upper.VaultURL = strings.Replace(acc.KeyVault.URL, "fake.vault.azure.net", "FAKE.Vault.Azure.NET", 1)
+	unchanged := resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+		attributeUnchanged{certAddr, "key_vault_url"}, plancheck.ExpectEmptyPlan(),
+	}}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: f.config(plain)},
+			{ConfigVariables: acmeVariables(), Config: f.config(slash), ConfigPlanChecks: unchanged},
+			{ConfigVariables: acmeVariables(), Config: f.config(upper), ConfigPlanChecks: unchanged},
+			{ConfigVariables: acmeVariables(), Config: f.config(plain), ConfigPlanChecks: unchanged},
 		},
 	})
 }
