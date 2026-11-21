@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -147,5 +148,20 @@ func TestConfigureWithUnknownValuesDoesNotConnect(t *testing.T) {
 	data, _ := resp.ResourceData.(*azureSQL)
 	if resp.Diagnostics.HasError() || data == nil || data.client == nil {
 		t.Errorf("known settings: want a client, got %+v, %v", resp.ResourceData, resp.Diagnostics)
+	}
+}
+
+func TestRequireClientFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	for name, data := range map[string]any{
+		"no provider data":   nil,
+		"no settings":        &azureSQL{reason: "not configured"},
+		"unexpected payload": "x",
+	} {
+		var diags diag.Diagnostics
+		if c := requireClient(data, &diags); c != nil || !diags.HasError() {
+			t.Errorf("%s: client %v, errors %v; want no client and an error", name, c, diags.HasError())
+		}
 	}
 }

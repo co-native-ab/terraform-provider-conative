@@ -25,12 +25,20 @@ type Client struct {
 	open     func(ctx context.Context, settings Settings, database string) (*sql.DB, error)
 
 	mu  sync.Mutex
-	dbs map[string]*sql.DB
+	dbs map[string]*pool
+}
+
+// pool is the one attempt to open a database. Callers share it: ready is closed once
+// db or err is set, and a failed open is kept for the rest of the run.
+type pool struct {
+	ready chan struct{}
+	db    *sql.DB
+	err   error
 }
 
 // New returns a Client for settings. It does not connect.
 func New(settings Settings) *Client {
-	return &Client{settings: settings, open: openDB, dbs: map[string]*sql.DB{}}
+	return &Client{settings: settings, open: openDB, dbs: map[string]*pool{}}
 }
 
 func (c *Client) db(ctx context.Context, database string) (*sql.DB, error) {
@@ -38,16 +46,24 @@ func (c *Client) db(ctx context.Context, database string) (*sql.DB, error) {
 		return nil, fmt.Errorf("database name %w", err)
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if db, ok := c.dbs[database]; ok {
-		return db, nil
+	p, ok := c.dbs[database]
+	if !ok {
+		p = &pool{ready: make(chan struct{})}
+		c.dbs[database] = p
 	}
-	db, err := c.open(ctx, c.settings, database)
-	if err != nil {
-		return nil, err
+	c.mu.Unlock()
+	if !ok {
+		// Open outside the lock so other databases are not held up. The first
+		// caller's context bounds the attempt.
+		p.db, p.err = c.open(ctx, c.settings, database)
+		close(p.ready)
 	}
-	c.dbs[database] = db
-	return db, nil
+	select {
+	case <-p.ready:
+		return p.db, p.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Exec runs one statement in a database. Statements are never retried.
@@ -125,13 +141,20 @@ func (c *Client) Users(ctx context.Context, database, query string, args ...any)
 	return out, err
 }
 
-// Close closes every pool.
+// Close closes every pool that opened. The provider does not call it: pools are meant
+// to live as long as the plugin process and are released when it exits.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var errs []error
-	for name, db := range c.dbs {
-		errs = append(errs, db.Close())
+	for name, p := range c.dbs {
+		select {
+		case <-p.ready:
+			if p.db != nil {
+				errs = append(errs, p.db.Close())
+			}
+		default: // still opening; nothing to close yet
+		}
 		delete(c.dbs, name)
 	}
 	return errors.Join(errs...)

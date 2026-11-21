@@ -20,10 +20,12 @@ type azureSQL struct {
 }
 
 // requireClient returns the client, or adds an error naming the missing settings.
+// It is for create, read, update, delete and data source reads, which only run after
+// the provider is configured; a missing client there is an error, never a silent skip.
 func requireClient(data any, diags *diag.Diagnostics) *sqlclient.Client {
 	a, ok := data.(*azureSQL)
 	if !ok || a == nil {
-		// Configure has not run yet, for example during import-only validation.
+		diags.AddError("Azure SQL settings are required", "the provider was not configured for this operation")
 		return nil
 	}
 	if a.client == nil {
