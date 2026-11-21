@@ -251,7 +251,7 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 }
 
 // prepareKeyVault checks the certificate in Key Vault and deletes a leftover pending
-// operation of issuer Unknown.
+// operation (one in progress of issuer Unknown, or a finished record of any issuer).
 func (o Order) prepareKeyVault(ctx context.Context) error {
 	del, err := CheckVault(ctx, o.Vault, o.Certificate, o.Creating, o.ImportID)
 	if err != nil {
@@ -267,7 +267,8 @@ func (o Order) prepareKeyVault(ctx context.Context) error {
 
 // CheckVault reads the versions and the pending operation of a Key Vault certificate and
 // applies the decision of acme.PrepareKeyVault. It only reads. It reports whether a
-// leftover pending operation has to be deleted before an order.
+// leftover pending operation has to be deleted before an order. A finished operation
+// (completed, failed or cancelled) never fails it, whatever its issuer.
 func CheckVault(ctx context.Context, vault *keyvault.Client, name string, creating bool, importID string) (deletePending bool, err error) {
 	var state acme.VaultState
 	versions, err := vault.ListVersions(ctx, name)
@@ -282,7 +283,7 @@ func CheckVault(ctx context.Context, vault *keyvault.Client, name string, creati
 	p, err := vault.GetPending(ctx, name)
 	switch {
 	case err == nil:
-		state.HasPending, state.PendingIssuer = true, p.Issuer
+		state.HasPending, state.PendingIssuer, state.PendingStatus = true, p.Issuer, p.Status
 	case !errors.Is(err, keyvault.ErrNotFound):
 		return false, fmt.Errorf("cannot read the pending operation of the Key Vault certificate %q: %w", name, err)
 	}

@@ -2,6 +2,7 @@ package acme
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Policy is the body of a Key Vault certificate create request.
@@ -88,15 +89,29 @@ type VaultState struct {
 	// HasIssuedVersion is true when the certificate has a version with an issued
 	// certificate.
 	HasIssuedVersion bool
-	// PendingIssuer is the issuer of a pending operation, empty when there is none.
+	// HasPending is true when Key Vault holds a pending-operation record. It keeps the
+	// record after the operation has finished.
+	HasPending bool
+	// PendingIssuer is the issuer of the pending operation.
 	PendingIssuer string
-	HasPending    bool
+	// PendingStatus is the status of the pending operation (for example "inProgress",
+	// "completed", "failed" or "cancelled"). Empty counts as in progress.
+	PendingStatus string
+}
+
+// PendingInProgress reports whether the pending operation is still running. Key Vault
+// keeps the record of a finished operation; only a running one blocks an order.
+func (s VaultState) PendingInProgress() bool {
+	return s.HasPending && (s.PendingStatus == "" || strings.EqualFold(s.PendingStatus, "inProgress"))
 }
 
 // PrepareKeyVault decides what to do before an order. When creating, an issued version
 // means the certificate already exists and must be imported instead. A pending
-// operation of issuer Unknown is left over from an earlier attempt and must be deleted;
-// one of another issuer belongs to someone else and fails the order.
+// operation that is not in progress (completed, failed or cancelled, of any issuer) is
+// only a leftover record: it does not block, and is deleted before an order. One that
+// is in progress with issuer Unknown is left over from an earlier attempt and must be
+// deleted; one in progress of another issuer belongs to someone else and fails the
+// order.
 func PrepareKeyVault(s VaultState, creating bool, importID string) (deletePending bool, err error) {
 	if creating && s.HasIssuedVersion {
 		return false, fmt.Errorf("the Key Vault certificate already exists; import it with the ID %s", importID)
@@ -104,8 +119,11 @@ func PrepareKeyVault(s VaultState, creating bool, importID string) (deletePendin
 	if !s.HasPending {
 		return false, nil
 	}
+	if !s.PendingInProgress() {
+		return true, nil
+	}
 	if s.PendingIssuer != UnknownIssuer {
-		return false, fmt.Errorf("the Key Vault certificate has a pending operation of issuer %q; cancel it before ordering", s.PendingIssuer)
+		return false, fmt.Errorf("the Key Vault certificate has an operation in progress of issuer %q; wait for it to finish or cancel it before ordering", s.PendingIssuer)
 	}
 	return true, nil
 }

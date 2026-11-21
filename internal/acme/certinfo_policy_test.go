@@ -214,6 +214,12 @@ func TestCreatePolicyAndPrepare(t *testing.T) {
 		"update clean":            {VaultState{HasIssuedVersion: true}, false, false, ""},
 		"update unknown pending":  {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "Unknown"}, false, true, ""},
 		"update other pending":    {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "OtherCA"}, false, false, "OtherCA"},
+		"other in progress":       {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "OtherCA", PendingStatus: "inProgress"}, false, false, "OtherCA"},
+		"unknown in progress":     {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "Unknown", PendingStatus: "InProgress"}, false, true, ""},
+		"self completed":          {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "Self", PendingStatus: "completed"}, false, true, ""},
+		"other failed":            {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "OtherCA", PendingStatus: "failed"}, false, true, ""},
+		"other cancelled":         {VaultState{HasIssuedVersion: true, HasPending: true, PendingIssuer: "OtherCA", PendingStatus: "cancelled"}, false, true, ""},
+		"create self completed":   {VaultState{HasPending: true, PendingIssuer: "Self", PendingStatus: "completed"}, true, true, ""},
 	} {
 		del, err := PrepareKeyVault(c.s, c.creating, id)
 		if del != c.del || (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
