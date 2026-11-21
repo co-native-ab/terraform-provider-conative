@@ -7,6 +7,15 @@ bumps the minor version.
 
 ## Unreleased
 
+## 0.1.1 (2026-11-21)
+
+### Security
+
+- Updated dependencies to address vulnerabilities reported by `govulncheck`:
+  - `google.golang.org/grpc` 1.83.2, which fixes GO-2026-6443.
+  - `golang.org/x/net` v0.63.0, which fixes GO-2026-6603, GO-2026-6611, GO-2026-6612 and GO-2026-6617.
+  - Go 1.27.4, which fixes GO-2026-6859 in `net/http`.
+
 ## 0.1.0 (2026-11-21)
 
 ### Added
