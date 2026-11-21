@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -85,4 +86,10 @@ func NewCerts(dir string) (*Certs, error) {
 		CAPool: pool,
 		Server: tls.Certificate{Certificate: [][]byte{srvDER, caDER}, PrivateKey: srvKey},
 	}, nil
+}
+
+// HTTPClient returns a client that trusts the per-run authority directly, for unit tests
+// that run without SSL_CERT_FILE.
+func (c *Certs) HTTPClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: c.CAPool, MinVersion: tls.VersionTLS12}}}
 }

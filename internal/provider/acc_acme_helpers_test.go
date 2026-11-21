@@ -269,3 +269,7 @@ func ipList(addrs ...string) []net.IP {
 	}
 	return out
 }
+
+func (f acmeFixture) registrationOnlyConfig() string {
+	return acmeProviderConfig() + f.registrationHCL("")
+}

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -178,4 +179,108 @@ func azureSQLOf(data any) *azureSQL {
 		return nil
 	}
 	return pd.azuresql
+}
+
+func acmeConfig(t *testing.T, kv, rm tftypes.Value, block bool) provider.ConfigureRequest {
+	t.Helper()
+	resp := providerSchema(t)
+	sqlType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{
+		"server": tftypes.String, "access_token": tftypes.String, "retry_timeout": tftypes.String,
+	}}
+	acmeType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{
+		"key_vault_access_token": tftypes.String, "resource_manager_access_token": tftypes.String,
+	}}
+	root := tftypes.Object{AttributeTypes: map[string]tftypes.Type{"azuresql": sqlType, "acme": acmeType}}
+	acmeValue := tftypes.NewValue(acmeType, nil)
+	if block {
+		acmeValue = tftypes.NewValue(acmeType, map[string]tftypes.Value{"key_vault_access_token": kv, "resource_manager_access_token": rm})
+	}
+	return provider.ConfigureRequest{Config: tfsdk.Config{Schema: resp.Schema, Raw: tftypes.NewValue(root, map[string]tftypes.Value{
+		"azuresql": tftypes.NewValue(sqlType, nil), "acme": acmeValue,
+	})}}
+}
+
+func TestACMETokensAreSensitive(t *testing.T) {
+	t.Parallel()
+	nested, ok := providerSchema(t).Schema.Attributes["acme"].(schema.SingleNestedAttribute)
+	if !ok || !nested.Optional {
+		t.Fatal("acme must be an optional single nested attribute: it is required only when used")
+	}
+	kv, rm := nested.Attributes["key_vault_access_token"], nested.Attributes["resource_manager_access_token"]
+	if !kv.IsSensitive() || !kv.IsRequired() {
+		t.Error("key_vault_access_token must be required and sensitive")
+	}
+	if !rm.IsSensitive() || !rm.IsOptional() {
+		t.Error("resource_manager_access_token must be optional and sensitive")
+	}
+}
+
+func TestConfigureACMEWithUnknownValuesDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	unknown := tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
+	known := tftypes.NewValue(tftypes.String, "a-token")
+	null := tftypes.NewValue(tftypes.String, nil)
+
+	for name, c := range map[string]struct {
+		req     provider.ConfigureRequest
+		unknown bool
+		hasKV   bool
+	}{
+		"no block":              {acmeConfig(t, null, null, false), false, false},
+		"unknown Key Vault":     {acmeConfig(t, unknown, known, true), true, false},
+		"unknown Resource Mgr":  {acmeConfig(t, known, unknown, true), false, true},
+		"both known":            {acmeConfig(t, known, known, true), false, true},
+		"only Key Vault is set": {acmeConfig(t, known, null, true), false, true},
+	} {
+		var resp provider.ConfigureResponse
+		New("test")().Configure(context.Background(), c.req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Errorf("%s: %v", name, resp.Diagnostics)
+			continue
+		}
+		pd, _ := resp.ResourceData.(*providerData)
+		if pd == nil || pd.acme == nil {
+			t.Errorf("%s: no ACME access", name)
+			continue
+		}
+		if pd.acme.unknown != c.unknown || (pd.acme.keyVaultToken != "") != c.hasKV {
+			t.Errorf("%s: %+v", name, pd.acme)
+		}
+		if !c.hasKV && pd.acme.reason == "" {
+			t.Errorf("%s: an unusable configuration needs a reason", name)
+		}
+	}
+}
+
+func TestRequireACMENamesTheMissingSetting(t *testing.T) {
+	t.Parallel()
+	var diags diag.Diagnostics
+	if a := requireACME(&providerData{acme: &acmeAccess{reason: "the acme block is not set"}}, &diags, false); a != nil || !diags.HasError() ||
+		!strings.Contains(diags.Errors()[0].Detail(), "key_vault_access_token") {
+		t.Errorf("a missing Key Vault token: %v", diags)
+	}
+	diags = nil
+	if a := requireACME(&providerData{acme: &acmeAccess{keyVaultToken: "t"}}, &diags, true); a != nil || !diags.HasError() ||
+		!strings.Contains(diags.Errors()[0].Detail(), "resource_manager_access_token") {
+		t.Errorf("a missing Resource Manager token: %v", diags)
+	}
+	diags = nil
+	if a := requireACME(&providerData{acme: &acmeAccess{keyVaultToken: "t", resourceManagerToken: "r"}}, &diags, true); a == nil || diags.HasError() {
+		t.Errorf("complete settings: %v", diags)
+	}
+	diags = nil
+	if a := requireACME(nil, &diags, false); a != nil || !diags.HasError() {
+		t.Error("no provider data must fail closed")
+	}
+}
+
+func TestNewUsesTheProductionEndpoints(t *testing.T) {
+	t.Parallel()
+	p, ok := New("test")().(*conativeProvider)
+	if !ok {
+		t.Fatal("unexpected provider type")
+	}
+	if p.acmeEnv.resourceManagerURL != "https://management.azure.com" || p.acmeEnv.cloudflareURL != "https://api.cloudflare.com/client/v4" || p.acmeEnv.propagation == nil {
+		t.Errorf("%+v", p.acmeEnv)
+	}
 }
