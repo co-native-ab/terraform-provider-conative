@@ -44,6 +44,10 @@ jobs:
             echo "A package that signs in to Microsoft Entra ID is in the dependency graph." >&2
             exit 1
           fi
+          if go list -deps ./... | grep -E 'golang\.org/x/crypto/acme/autocert'; then
+            echo "golang.org/x/crypto/acme/autocert is in the dependency graph." >&2
+            exit 1
+          fi
           if go list -deps . | grep -E '/internal/acctest'; then
             echo "Acceptance test tooling is linked into the provider binary." >&2
             exit 1
