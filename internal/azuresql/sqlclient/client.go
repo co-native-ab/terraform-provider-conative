@@ -45,25 +45,50 @@ func (c *Client) db(ctx context.Context, database string) (*sql.DB, error) {
 	if err := azuresql.ValidateName(database); err != nil {
 		return nil, fmt.Errorf("database name %w", err)
 	}
-	c.mu.Lock()
-	p, ok := c.dbs[database]
-	if !ok {
-		p = &pool{ready: make(chan struct{})}
-		c.dbs[database] = p
-	}
-	c.mu.Unlock()
-	if !ok {
-		// Open outside the lock so other databases are not held up. The first
-		// caller's context bounds the attempt.
-		p.db, p.err = c.open(ctx, c.settings, database)
-		close(p.ready)
-	}
-	select {
-	case <-p.ready:
+	for {
+		c.mu.Lock()
+		p, ok := c.dbs[database]
+		if !ok {
+			p = &pool{ready: make(chan struct{})}
+			c.dbs[database] = p
+		}
+		c.mu.Unlock()
+		if !ok {
+			// Open outside the lock so other databases are not held up. The first
+			// caller's context bounds the attempt.
+			db, err := c.open(ctx, c.settings, database)
+			if err != nil && ctx.Err() != nil {
+				// The caller gave up; that says nothing about the database, so the
+				// next caller tries again instead of inheriting this error.
+				c.forget(database, p)
+			}
+			p.db, p.err = db, err
+			close(p.ready)
+		}
+		select {
+		case <-p.ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if p.err != nil && ok && isContextError(p.err) && ctx.Err() == nil {
+			// The caller that opened gave up; try again with this caller's context.
+			continue
+		}
 		return p.db, p.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
+}
+
+// forget removes p from the pools if it is still the entry for database.
+func (c *Client) forget(database string, p *pool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dbs[database] == p {
+		delete(c.dbs, database)
+	}
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // Exec runs one statement in a database. Statements are never retried.

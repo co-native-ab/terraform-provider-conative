@@ -70,3 +70,28 @@ func TestDBSlowOpenDoesNotBlockOtherDatabases(t *testing.T) {
 	close(release)
 	<-done
 }
+
+func TestDBDoesNotRememberACancelledOpen(t *testing.T) {
+	t.Parallel()
+
+	var opens atomic.Int32
+	c := New(Settings{})
+	c.open = func(ctx context.Context, _ Settings, _ string) (*sql.DB, error) {
+		if opens.Add(1) == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("reached the server")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.db(ctx, "orders"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first call: got %v, want context canceled", err)
+	}
+	if _, err := c.db(context.Background(), "orders"); err == nil || errors.Is(err, context.Canceled) {
+		t.Fatalf("second call: got %v, want a fresh open error", err)
+	}
+	if n := opens.Load(); n != 2 {
+		t.Errorf("open ran %d times, want 2", n)
+	}
+}
