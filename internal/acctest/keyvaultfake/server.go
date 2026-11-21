@@ -241,48 +241,75 @@ func (s *Server) SetFailure(status int) {
 	s.failStatus = status
 }
 
-// The Key Vault data actions (Azure RBAC) the fake authorises requests with. Key Vault
-// authorises every pending-operation request, even a read, as certificates/create/action.
+// The Key Vault data actions (Azure RBAC) the fake authorises requests with.
 const (
 	ActionCertificatesRead   = "Microsoft.KeyVault/vaults/certificates/read"
 	ActionCertificatesCreate = "Microsoft.KeyVault/vaults/certificates/create/action"
+	ActionCertificatesUpdate = "Microsoft.KeyVault/vaults/certificates/update/action"
 	ActionCertificatesDelete = "Microsoft.KeyVault/vaults/certificates/delete"
 	ActionKeysRead           = "Microsoft.KeyVault/vaults/keys/read"
 	ActionKeysSign           = "Microsoft.KeyVault/vaults/keys/sign/action"
 	ActionSecretsGet         = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
 )
 
-// dataAction maps a request to the data action Key Vault authorises it with; it is empty
-// for a request the fake does not know (for example listing keys or certificates, which
-// the provider never does), which restricted rights refuse.
-func dataAction(method, path string) string {
+// dataActions maps a request to the data actions it needs; the caller must hold all of
+// them. The list is empty for a request the fake does not know (for example listing keys
+// or certificates, which the provider never does), which restricted rights refuse.
+//
+// For the pending operation of a certificate (/certificates/{name}/pending), Key Vault
+// authorises reading it as certificates/create/action, although Microsoft's REST
+// reference names the get permission for that request. For deleting (and updating) a
+// pending operation the REST reference names the update permission; which data action
+// Key Vault really checks is not documented, and the observed read shows that the REST
+// reference is not a reliable guide for this endpoint. The documented permissions
+// therefore list every candidate (create/action, update/action and delete), and the fake
+// requires all of them, so that dropping any one from the documentation fails a test.
+// Merging is authorised as certificates/create/action.
+func dataActions(method, path string) []string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
-		return ""
+		return nil
 	}
 	switch parts[0] {
 	case "secrets":
-		return ActionSecretsGet
+		return []string{ActionSecretsGet}
 	case "keys":
 		switch {
 		case len(parts) == 3 && method == http.MethodGet:
-			return ActionKeysRead
+			return []string{ActionKeysRead}
 		case len(parts) == 4 && parts[3] == "sign" && method == http.MethodPost:
-			return ActionKeysSign
+			return []string{ActionKeysSign}
 		}
 	case "certificates":
 		switch {
+		case len(parts) >= 3 && parts[2] == "pending" && (method == http.MethodDelete || method == http.MethodPatch):
+			return []string{ActionCertificatesCreate, ActionCertificatesUpdate, ActionCertificatesDelete}
 		case len(parts) >= 3 && parts[2] == "pending":
-			// Key Vault authorises reading a pending operation as create/action. The fake asks
-			// the same for deleting and merging one: an identity that orders holds it anyway.
-			// (Key Vault may authorise the delete as certificates/update/action instead.)
-			return ActionCertificatesCreate
+			return []string{ActionCertificatesCreate} // read, merge
 		case len(parts) == 3 && parts[2] == "create" && method == http.MethodPost:
-			return ActionCertificatesCreate
+			return []string{ActionCertificatesCreate}
 		case method == http.MethodGet && (len(parts) == 2 || len(parts) == 3):
-			return ActionCertificatesRead // the certificate, a version, the list of versions
+			return []string{ActionCertificatesRead} // the certificate, a version, the list of versions
 		case method == http.MethodDelete && len(parts) == 2:
-			return ActionCertificatesDelete
+			return []string{ActionCertificatesDelete} // destroy; an order never deletes the certificate
+		}
+	}
+	return nil
+}
+
+// missingAction returns the first data action the request needs that is not granted
+// ("" when the request is allowed or every action is granted).
+func (s *Server) missingAction(method, path string) string {
+	if s.granted == nil {
+		return ""
+	}
+	need := dataActions(method, path)
+	if len(need) == 0 {
+		return "unknown data action"
+	}
+	for _, a := range need {
+		if !s.granted[a] {
+			return a
 		}
 	}
 	return ""
@@ -680,10 +707,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	// With restricted rights the fake fails closed: a request it cannot map to a data
 	// action is refused, so a new kind of request cannot slip through a read-only test.
-	if action := dataAction(r.Method, path); s.granted != nil && (action == "" || !s.granted[action]) {
-		if action == "" {
-			action = "unknown data action"
-		}
+	if action := s.missingAction(r.Method, path); action != "" {
 		s.denyAction(w, r, action)
 		return
 	}

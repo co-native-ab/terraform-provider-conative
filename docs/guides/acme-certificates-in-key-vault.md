@@ -333,9 +333,18 @@ certificate, because a certificate from one authority is not valid for the other
 account at the same `server_url`, or setting it for the first time after an import, only updates the state
 and orders nothing.
 
-If the registration is replaced in the same run (for example its `account_key_id` changes, so that
-`registration_id` is not known until apply), the plan cannot tell whether the authority changes, and the
-certificate is ordered again.
+If the registration is created or replaced in the same run (for example its `account_key_id` changes, so that
+`registration_id` is not known until apply), the plan cannot tell yet whether the authority changes. It shows
+an in-place update with the attributes of a new version (`version`, `issued_version`, `thumbprint`,
+`not_after` and `certificate_pem`) as "known after apply". During apply, once the registration exists,
+Terraform plans the certificate again with the known `registration_id`, and the provider decides then by the
+same rules as for any other update: it orders if the new registration's `server_url` differs from that of
+the registration in the state, if the names or the key type changed, or if a renewal is due (see
+[Renewal and consumers](#renewal-and-consumers)). Otherwise nothing is sent to Key Vault, DNS or the
+authority: the apply records the new `registration_id` and the attributes keep the values of the current
+version. A certificate that was imported and has had no registration recorded yet is never ordered because of
+the registration alone. A plan that leaves the decision to apply reads neither the certificate's versions nor
+the DNS zones; the plan during apply does, if it orders.
 
 ## Some authorities do not report or keep what you send
 
@@ -436,21 +445,28 @@ Key Vault data actions (Azure RBAC) for each operation:
 | Refresh, import and plan of a certificate | `Microsoft.KeyVault/vaults/certificates/read` (get, list versions) | none |
 | Plan when an order is due | `certificates/read` only, as above | Azure DNS: `Microsoft.Network/dnsZones/read` with the Resource Manager token, for each `azure_dns` block that serves a name of the order; Cloudflare: *Zone: Zone: Read* for each `cloudflare` block that serves one. The plan only reads, and fails with a clear error if it cannot read the zone. |
 | Create a registration, change its `email`, import a registration | `keys/read` and `Microsoft.KeyVault/vaults/keys/sign/action` on the account key | the certificate authority |
-| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version, reading the pending operation and merging the issued chain), `certificates/update/action` (deleting a pending operation, whether it is cancelled or only a finished record; `certificates/delete` is listed with it until it has been verified that the update action is enough on its own), `certificates/delete`, and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
+| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version, reading the pending operation and merging the issued chain), `certificates/update/action` and `certificates/delete` (deleting a pending operation: a finished record or a cancelled leftover; see below), and `keys/read` and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
 | Destroy with `revoke_on_destroy = true` | `certificates/read`, `certificates/delete`, `keys/sign/action` | the certificate authority |
 | Destroy with `revoke_on_destroy = false` | `certificates/delete` | none |
 
 The pending-operation endpoint (`/certificates/<name>/pending`) needs `certificates/create/action` even to
-read it, so the provider uses it only at apply; plan and refresh never call it.
+read it, although Microsoft's REST reference names the get permission for
+[reading a pending operation](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/get-certificate-operation/get-certificate-operation),
+so the provider uses it only at apply; plan and refresh never call it. For
+[deleting a pending operation](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/delete-certificate-operation/delete-certificate-operation)
+the REST reference names the update permission, but which data action Key Vault checks is not documented. An
+order therefore lists every candidate, `certificates/create/action`, `certificates/update/action` and
+`certificates/delete`, so that it works whichever Key Vault asks for. An order never deletes the Key Vault
+certificate itself. *Key Vault Certificates Officer* grants all of them.
 
-For example, *Key Vault Reader* (metadata only), or *Key Vault Certificates Officer* for the certificate data
-actions and *Key Vault Crypto User* for `keys/read` and `keys/sign/action`. Rights for refresh and plan are a
-strict subset of those for apply, so a pipeline can run plans with a read-only identity and applies with a
-writing one. The merge needs only the certificate create and update rights; it does not need the `import`
-data action. The certificate's own key needs no key permission. With access policies instead of RBAC, the
-equivalent are the certificate permissions `get`, `list`, `create`, `update` and `delete`, and the key
-permissions `get` and `sign`. A plan in which an order is due also needs, for the DNS side, only read access
-to the zones, as the table shows.
+For example, *Key Vault Reader* (metadata only) for plans, or for apply *Key Vault Certificates Officer*,
+which covers every certificate data action above, and *Key Vault Crypto User* for `keys/read` and
+`keys/sign/action` on the account key. Rights for refresh and plan are a strict subset of those for apply, so
+a pipeline can run plans with a read-only identity and applies with a writing one. The merge needs only
+`certificates/create/action`; it does not need the `import` data action. The certificate's own key needs no
+key permission. With access policies instead of RBAC, the equivalent are the certificate permissions `get`,
+`list`, `create`, `update` and `delete`, and the key permissions `get` and `sign`. A plan in which an order is
+due also needs, for the DNS side, only read access to the zones, as the table shows.
 
 Azure DNS: for each `azure_dns` block, read the zone and read, write and delete TXT record sets, for example
 with the built-in *DNS Zone Contributor* role (broader than needed) or a custom role limited to the actions
@@ -485,6 +501,13 @@ terraform import conative_acme_certificate.example https://example.vault.azure.n
 
 Any Key Vault certificate can be imported, including one issued by another authority or imported from a PFX
 file. Import reads only the current version and changes nothing.
+
+An `import` block works in the same run that creates the registration the certificate references: one plan
+and one apply are enough. The plan shows the import and an in-place update whose version attributes are
+"known after apply", because `registration_id` is not known yet. During apply the provider decides with the
+known value, as described in [Authority changes](#authority-changes): unless the certificate is due or its
+names or key type differ from the configuration, it writes nothing to Key Vault and only records the
+arguments in the state, and the next plan is empty. If it is due or differs, the apply orders a new version.
 
 1. Import records the names, key type, expiry and thumbprint from the certificate itself, and sets
    `min_days_remaining` to `30`.
@@ -527,3 +550,6 @@ for the exact rules, including the certificates that cannot be imported.
 - The certificate's key is always generated in Key Vault, exportable, and new for every version; an existing
   key cannot be reused.
 - Certificate profiles and preferred chains are not supported.
+- A saved plan (`terraform plan -out`) that orders nothing fails at apply if the certificate has entered its
+  renewal window in the meantime: Terraform reports that the provider produced an inconsistent final plan, and
+  nothing is changed. Plan again; the new plan shows the renewal.

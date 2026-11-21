@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file. The format is b
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0.0, an incompatible change
 bumps the minor version.
 
+## 0.2.2 (2026-11-21)
+
+### Fixed
+
+- Documentation: `conative_acme_certificate` with a `registration_id` that is not known at plan, because the
+  registration is created or replaced in the same run, was documented as always ordering a new certificate.
+  It does not: the plan shows an in-place update with `version`, `issued_version`, `thumbprint`, `not_after`
+  and `certificate_pem` unknown, Terraform plans the certificate again during apply with the known
+  `registration_id`, and the provider orders only when the authority (`server_url`), the names or the key
+  type change or a renewal is due. Otherwise the apply sends nothing to Key Vault, DNS or the authority and
+  only records the state. This also means that an `import` block for an existing certificate works in the
+  same run that creates its registration; the guide's import section now says so. Acceptance tests cover
+  these cases.
+- Documentation: the permissions for an order now list `keys/read` on the account key, which the signer
+  needs, and every data action that Key Vault may check when a pending operation is deleted:
+  `certificates/create/action`, `certificates/update/action` and `certificates/delete`. Microsoft's REST
+  reference names the update permission for that request, but Key Vault authorises the pending-operation
+  endpoint differently from it (a read needs `certificates/create/action`), so all three are listed.
+  *Key Vault Certificates Officer* grants them all.
+
+### Changed
+
+- A plan in which a value that decides whether to order is not known yet (for example `registration_id`)
+  no longer reads the certificate's versions or the DNS zones; the plan that Terraform makes during apply
+  does, if it orders. Such a plan therefore no longer needs zone read access when no order happens.
+- The Key Vault test double requires `certificates/create/action`, `certificates/update/action` and
+  `certificates/delete` to delete a pending operation, and an acceptance test runs orders with exactly the
+  data actions the guide lists, so the documented permissions and the tests cannot drift apart.
+
 ## 0.2.1 (2026-11-21)
 
 ### Fixed

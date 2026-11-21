@@ -258,7 +258,14 @@ func (r *acmeCertificateResource) ModifyPlan(ctx context.Context, req resource.M
 		order, reason = decideOrder(time.Now(), plan, state)
 		orderReason = reason
 		if order {
-			tflog.Info(ctx, "a new certificate will be ordered", map[string]any{"reason": reason})
+			if orderUncertain(plan) {
+				// Terraform plans the resource again during apply, when the values are known,
+				// and this function then makes the real decision; until then a new version is
+				// only possible.
+				tflog.Info(ctx, "whether a new certificate is ordered is decided at apply", map[string]any{"reason": reason})
+			} else {
+				tflog.Info(ctx, "a new certificate will be ordered", map[string]any{"reason": reason})
+			}
 			for _, a := range orderedComputed {
 				resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root(a), types.StringUnknown())...)
 			}
@@ -276,8 +283,11 @@ func (r *acmeCertificateResource) ModifyPlan(ctx context.Context, req resource.M
 	}
 	// A new certificate is certain to be ordered; an update orders only when the values
 	// that decide it are known.
-	r.checkTokens(ctx, plan, req.Config, orderReason, creating || !orderUncertain(plan), &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
+	certain := creating || !orderUncertain(plan)
+	r.checkTokens(ctx, plan, req.Config, orderReason, certain, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() || !certain {
+		// An update that only may order reads nothing more now: Terraform plans it again
+		// during apply with the values known, and that plan runs these checks if it orders.
 		return
 	}
 	r.preflight(ctx, plan, req.Config, creating, &resp.Diagnostics)
@@ -290,7 +300,11 @@ func orderUncertain(plan acmeCertificateModel) bool {
 }
 
 // decideOrder decides whether an update orders a new certificate. A value that is not
-// known yet counts as a change, so that nothing is promised that apply might not do.
+// known yet counts as a possible change: the plan shows the attributes of a new version
+// as unknown, so that nothing is promised that apply might not do. Terraform plans the
+// resource again during apply with every value known (for example the registration_id
+// of a registration created in the same run), and that plan decides; any value of the
+// current version is then a valid result for the attributes that were unknown.
 func decideOrder(now time.Time, plan, state acmeCertificateModel) (bool, string) {
 	if orderUncertain(plan) {
 		return true, "a name, the key type, min_days_remaining or the registration is not known until apply"
