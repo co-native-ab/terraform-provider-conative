@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"crypto/x509"
 	"fmt"
 	"regexp"
 	"slices"
@@ -9,8 +10,6 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
-
-	"github.com/co-native-ab/terraform-provider-conative/internal/acme"
 )
 
 // serialOf returns the serial number of the certificate in the state.
@@ -20,11 +19,11 @@ func serialOf(s *terraform.State) (string, error) {
 		return "", err
 	}
 	der := acc.KeyVault.LeafDER(a["certificate_name"], a["version"])
-	info, err := acme.Inspect(der)
+	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
 		return "", err
 	}
-	return info.Serial, nil
+	return leaf.SerialNumber.String(), nil
 }
 
 func TestAccACMECertificate_revokeOnDestroy(t *testing.T) {

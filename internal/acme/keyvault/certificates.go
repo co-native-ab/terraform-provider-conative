@@ -46,7 +46,6 @@ type Bundle struct {
 	// Cer is the leaf certificate, DER; empty for a version that is still pending.
 	Cer     []byte
 	Created time.Time
-	Expires time.Time
 	Enabled bool
 	// Issued is true when the version has a certificate (it is not a pending version).
 	Issued bool
@@ -59,7 +58,6 @@ type bundleJSON struct {
 	Attributes struct {
 		Enabled *bool `json:"enabled"`
 		Created int64 `json:"created"`
-		Exp     int64 `json:"exp"`
 	} `json:"attributes"`
 }
 
@@ -74,9 +72,6 @@ func (b bundleJSON) decode() (Bundle, error) {
 	}
 	if b.Attributes.Created != 0 {
 		out.Created = time.Unix(b.Attributes.Created, 0).UTC()
-	}
-	if b.Attributes.Exp != 0 {
-		out.Expires = time.Unix(b.Attributes.Exp, 0).UTC()
 	}
 	return out, nil
 }

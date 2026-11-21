@@ -71,9 +71,6 @@ func New(baseURL, token string, hc *http.Client) (*Client, error) {
 	return &Client{base: "https://" + u.Host, token: token, http: hc}, nil
 }
 
-// Base returns the vault URL the client talks to.
-func (c *Client) Base() string { return c.base }
-
 // do sends a request. pathTemplate is logged instead of the path, which carries names.
 func (c *Client) do(ctx context.Context, method, path, pathTemplate string, body, out any) error {
 	return c.doURL(ctx, method, c.base+path+"?api-version="+apiVersion, pathTemplate, body, out)

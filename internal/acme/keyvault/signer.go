@@ -81,6 +81,3 @@ func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 	}
 	return acme.RawToASN1(sig, s.size)
 }
-
-// Algorithm returns the signature algorithm of the key.
-func (s *Signer) Algorithm() string { return s.alg }

@@ -2,7 +2,6 @@ package acme
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -87,14 +86,4 @@ func Route(identifiers []string, blocks []Block) (map[string]Block, error) {
 		out[id] = blocks[best]
 	}
 	return out, nil
-}
-
-// SortedKeys returns the keys of a routing result in a stable order.
-func SortedKeys(m map[string]Block) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

@@ -5,6 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/asn1"
+	"fmt"
+	"math/big"
 	"testing"
 	"time"
 )
@@ -55,7 +58,7 @@ func TestECDSASignatureConversion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			raw, err := ASN1ToRaw(der, size)
+			raw, err := asn1ToRaw(der, size)
 			if err != nil || len(raw) != 2*size {
 				t.Fatalf("%v %d", err, len(raw))
 			}
@@ -71,13 +74,39 @@ func TestECDSASignatureConversion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back, err := ASN1ToRaw(der, 32); err != nil || !bytes.Equal(back, raw) {
+	if back, err := asn1ToRaw(der, 32); err != nil || !bytes.Equal(back, raw) {
 		t.Errorf("padding: %v", err)
 	}
 	if _, err := RawToASN1(make([]byte, 63), 32); err == nil {
 		t.Error("wrong length accepted")
 	}
-	if _, err := ASN1ToRaw(append(der, 0), 32); err == nil {
+	if _, err := asn1ToRaw(append(der, 0), 32); err == nil {
 		t.Error("trailing data accepted")
 	}
+}
+
+// asn1ToRaw converts an ASN.1 DER ECDSA signature into fixed-width r||s.
+func asn1ToRaw(der []byte, size int) ([]byte, error) {
+	var sig struct{ R, S *big.Int }
+	rest, err := asn1.Unmarshal(der, &sig)
+	if err != nil {
+		return nil, fmt.Errorf("not an ECDSA signature: %w", err)
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("not an ECDSA signature: %d bytes of trailing data", len(rest))
+	}
+	if sig.R == nil || sig.S == nil || sig.R.Sign() <= 0 || sig.S.Sign() <= 0 {
+		return nil, fmt.Errorf("not an ECDSA signature: r and s must be positive")
+	}
+	r, s := sig.R.Bytes(), sig.S.Bytes()
+	if len(r) > size || len(s) > size {
+		return nil, fmt.Errorf("an ECDSA signature value is longer than %d bytes", size)
+	}
+	return bytes.Join([][]byte{pad(r, size), pad(s, size)}, nil), nil
+}
+
+func pad(b []byte, size int) []byte {
+	out := make([]byte, size)
+	copy(out[size-len(b):], b)
+	return out
 }

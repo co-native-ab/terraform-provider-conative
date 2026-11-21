@@ -295,15 +295,6 @@ func (p *ZonePublisher) Check(ctx context.Context) error {
 	return nil
 }
 
-// NameServers returns the zone's authoritative name servers.
-func (p *ZonePublisher) NameServers(ctx context.Context) ([]string, error) {
-	z, err := p.client.GetZone(ctx, p.sub, p.rg, p.zone)
-	if err != nil {
-		return nil, fmt.Errorf("the Azure DNS zone %q: %w", p.zone, err)
-	}
-	return z.NameServers, nil
-}
-
 // Zone returns the zone name.
 func (p *ZonePublisher) Zone() string { return p.zone }
 

@@ -2,6 +2,7 @@ package issuer_test
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"net/http"
 	"slices"
@@ -261,8 +262,12 @@ func TestRevoke(t *testing.T) {
 	if err := issuer.Revoke(ctx, e.reg, res.Bundle.Cer); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.acme.Revoked(); !slices.Equal(got, []string{res.Info.Serial}) {
-		t.Errorf("revoked %v, want %s", got, res.Info.Serial)
+	leaf, err := x509.ParseCertificate(res.Bundle.Cer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.acme.Revoked(); !slices.Equal(got, []string{leaf.SerialNumber.String()}) {
+		t.Errorf("revoked %v, want %s", got, leaf.SerialNumber)
 	}
 	if err := issuer.Revoke(ctx, e.reg, res.Bundle.Cer); err != nil {
 		t.Errorf("revoking twice: %v", err)

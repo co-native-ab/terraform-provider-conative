@@ -23,7 +23,6 @@ type Info struct {
 	// name, sorted. Empty when the certificate has no other name.
 	SANs    []string
 	KeyType string
-	Serial  string
 }
 
 // NotAfterString formats the expiry as RFC 3339 in UTC.
@@ -55,7 +54,6 @@ func Inspect(der []byte) (Info, error) {
 		CommonName: cn,
 		SANs:       sans,
 		KeyType:    KeyTypeOf(cert.PublicKey),
-		Serial:     cert.SerialNumber.String(),
 	}, nil
 }
 
