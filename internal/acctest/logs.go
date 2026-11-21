@@ -96,3 +96,15 @@ func AssertNoSecretInFiles(t *testing.T, dir, secret string, names ...string) in
 	}
 	return searched
 }
+
+// AssertLogContains fails the test if the file does not contain the text.
+func AssertLogContains(t *testing.T, path, text string) {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // the path is created by the test
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", path, err)
+	}
+	if !bytes.Contains(data, []byte(text)) {
+		t.Errorf("%s does not contain %q", path, text)
+	}
+}

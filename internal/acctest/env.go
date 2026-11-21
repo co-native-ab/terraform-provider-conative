@@ -7,6 +7,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/acmefake"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/azurednsfake"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/cloudflarefake"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/dnsstore"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/fakehttp"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/keyvaultfake"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/tdsproxy"
 )
 
@@ -23,6 +29,19 @@ type Env struct {
 	WrongToken string
 	// Server is "localhost:port" of the proxy: what a provider configuration uses.
 	Server string
+
+	// The fakes of the ACME area and the DNS they share. They serve HTTPS on localhost
+	// with the per-run certificate and accept only their own random token.
+	DNS        *dnsstore.Store
+	ACME       *acmefake.Server
+	KeyVault   *keyvaultfake.Server
+	AzureDNS   *azurednsfake.Server
+	Cloudflare *cloudflarefake.Server
+	// KeyVaultToken, ResourceManagerToken and CloudflareToken are random tokens of the
+	// shape of real ones, so that tests can search for them. Each fake rejects the others.
+	KeyVaultToken        string
+	ResourceManagerToken string
+	CloudflareToken      string
 
 	dir string
 }
@@ -53,6 +72,20 @@ func SetupEnv(ctx context.Context) (*Env, error) {
 	if e.WrongToken, err = randomToken(); err != nil {
 		return fail(err)
 	}
+	for _, t := range []*string{&e.KeyVaultToken, &e.ResourceManagerToken, &e.CloudflareToken} {
+		if *t, err = randomToken(); err != nil {
+			return fail(err)
+		}
+	}
+	e.DNS = dnsstore.New()
+	if e.ACME, err = acmefake.Start(e.Certs.Server, e.DNS); err != nil {
+		return fail(err)
+	}
+	if e.KeyVault, err = keyvaultfake.Start(e.Certs.Server, e.KeyVaultToken); err != nil {
+		return fail(err)
+	}
+	e.AzureDNS = azurednsfake.Start(e.Certs.Server, e.ResourceManagerToken, e.DNS)
+	e.Cloudflare = cloudflarefake.Start(e.Certs.Server, e.DNS)
 	if e.Container, err = StartContainer(ctx); err != nil {
 		return fail(err)
 	}
@@ -86,8 +119,70 @@ func ServerName(p *tdsproxy.Proxy) string {
 	return fmt.Sprintf("localhost:%d", port)
 }
 
-// Close stops the proxy, removes the container and deletes the temporary files.
+// Mark is a position in the request journals of the four fakes.
+type Mark struct{ acme, keyVault, azureDNS, cloudflare int }
+
+// ACMEPosition is the position in the certificate authority's journal.
+func (m Mark) ACMEPosition() int { return m.acme }
+
+// AzureDNSPosition is the position in the Azure DNS journal.
+func (m Mark) AzureDNSPosition() int { return m.azureDNS }
+
+// CloudflarePosition is the position in the Cloudflare journal.
+func (m Mark) CloudflarePosition() int { return m.cloudflare }
+
+// Mark returns the current position of every journal.
+func (e *Env) Mark() Mark {
+	return Mark{e.ACME.Journal.Mark(), e.KeyVault.Journal.Mark(), e.AzureDNS.Journal.Mark(), e.Cloudflare.Journal.Mark()}
+}
+
+// WritesSince lists, across the four fakes, the requests since the mark that changed
+// something. Reads (including Key Vault sign operations and ACME account lookups) are
+// not listed.
+func (e *Env) WritesSince(m Mark) []string {
+	var out []string
+	add := func(prefix string, entries []fakehttp.Entry) {
+		for _, w := range entries {
+			out = append(out, prefix+" "+w.String())
+		}
+	}
+	add("acme", e.ACME.Journal.WritesSince(m.acme))
+	add("keyvault", e.KeyVault.Journal.WritesSince(m.keyVault))
+	add("azuredns", e.AzureDNS.Journal.WritesSince(m.azureDNS))
+	add("cloudflare", e.Cloudflare.Journal.WritesSince(m.cloudflare))
+	return out
+}
+
+// RequestsSince lists every request, read or write, that any fake served since the mark.
+func (e *Env) RequestsSince(m Mark) []string {
+	var out []string
+	add := func(prefix string, entries []fakehttp.Entry) {
+		for _, w := range entries {
+			out = append(out, prefix+" "+w.String())
+		}
+	}
+	add("acme", e.ACME.Journal.Since(m.acme))
+	add("keyvault", e.KeyVault.Journal.Since(m.keyVault))
+	add("azuredns", e.AzureDNS.Journal.Since(m.azureDNS))
+	add("cloudflare", e.Cloudflare.Journal.Since(m.cloudflare))
+	return out
+}
+
+// Close stops the fakes and the proxy, removes the container and deletes the temporary
+// files.
 func (e *Env) Close() {
+	if e.ACME != nil {
+		e.ACME.Close()
+	}
+	if e.KeyVault != nil {
+		e.KeyVault.Close()
+	}
+	if e.AzureDNS != nil {
+		e.AzureDNS.Close()
+	}
+	if e.Cloudflare != nil {
+		e.Cloudflare.Close()
+	}
 	if e.Proxy != nil {
 		_ = e.Proxy.Close()
 	}
