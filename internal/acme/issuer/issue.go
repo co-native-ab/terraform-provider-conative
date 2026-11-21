@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 	xacme "golang.org/x/crypto/acme"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acme"
@@ -52,6 +53,23 @@ type Result struct {
 	Info   acme.Info
 }
 
+// ErrRegistrationGone is returned when the certificate authority has no account for the
+// registration's key any more.
+var ErrRegistrationGone = errors.New("the certificate authority has no account for the registration's key " +
+	"(it was deleted or deactivated there, or never created): recreate it with " +
+	"`terraform apply -replace=<address of the conative_acme_registration>` and apply again")
+
+// LeftoverError wraps the error of a failed order that created the Key Vault
+// certificate: the certificate stays, without an issued version, so that a retry of the
+// same configuration reuses it.
+type LeftoverError struct {
+	Certificate string
+	Err         error
+}
+
+func (e *LeftoverError) Error() string { return e.Err.Error() }
+func (e *LeftoverError) Unwrap() error { return e.Err }
+
 // published is a record the order wrote and must remove.
 type published struct {
 	publisher DNSPublisher
@@ -76,7 +94,7 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	acct, err := Lookup(ctx, o.Registration)
 	if err != nil {
 		if errors.Is(err, ErrNoAccount) {
-			return Result{}, errors.New("the certificate authority has no account for the registration's key; apply the conative_acme_registration first")
+			return Result{}, ErrRegistrationGone
 		}
 		return Result{}, err
 	}
@@ -89,8 +107,14 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	}
 	pending, err := o.Vault.CreateCertificate(ctx, name, policy)
 	if err != nil {
-		return Result{}, fmt.Errorf("cannot create the Key Vault certificate %q: %w", name, err)
+		hint := ""
+		var ae *keyvault.APIError
+		if errors.As(err, &ae) && ae.DeletedButRecoverable() {
+			hint = fmt.Sprintf(" (the name is held by a deleted certificate: recover or purge the deleted certificate %q in the vault, then apply again)", name)
+		}
+		return Result{}, fmt.Errorf("cannot create the Key Vault certificate %q: %w%s", name, err, hint)
 	}
+	tflog.Debug(ctx, "created the pending Key Vault operation", map[string]any{"creating": o.Creating})
 
 	var written []published
 	merged := false
@@ -98,6 +122,13 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 		if err == nil {
 			return
 		}
+		defer func() {
+			// The certificate object stays when its first order fails: Key Vault soft delete
+			// would hold the name for the retention period, and purging is often not allowed.
+			if o.Creating && !merged {
+				err = &LeftoverError{Certificate: name, Err: err}
+			}
+		}()
 		// Clean up even when the operation was cancelled.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
@@ -148,9 +179,17 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 		if authz.Wildcard {
 			identifier = "*." + identifier
 		}
-		if authz.Status == xacme.StatusValid {
+		if authz.Status != xacme.StatusPending {
+			// Valid: the authority reuses an earlier validation. Processing: another order
+			// for the same name is being validated. Anything else is reported by the order.
+			state := "other"
+			if authz.Status == xacme.StatusValid {
+				state = "reused"
+			}
+			tflog.Debug(ctx, "authorization needs no challenge", map[string]any{"identifier": identifier, "status": authz.Status, "state": state})
 			continue
 		}
+		tflog.Debug(ctx, "authorization is pending", map[string]any{"identifier": identifier, "status": authz.Status, "state": "pending"})
 		var dns *xacme.Challenge
 		for _, c := range authz.Challenges {
 			if c.Type == "dns-01" {
@@ -202,21 +241,45 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 		checks[i] = dnscheck.Record{FQDN: fqdn, Zone: owner[fqdn].Zone(), Values: records[fqdn]}
 	}
 	if cerr := o.Checker.Wait(ctx, checks); cerr != nil {
-		return Result{}, fmt.Errorf("the challenge records did not become visible: %w", cerr)
+		// A record shared with an order that ran at the same time may have been removed
+		// by it after it got the authority's validation; if every authorization is no
+		// longer pending, there is nothing left to wait for.
+		stillPending := false
+		for _, c := range challenges {
+			a, gerr := client.GetAuthorization(ctx, c.authz)
+			if gerr != nil || a.Status == xacme.StatusPending {
+				stillPending = true
+				break
+			}
+		}
+		if stillPending || len(challenges) == 0 {
+			return Result{}, fmt.Errorf("the challenge records did not become visible: %w", cerr)
+		}
+		tflog.Debug(ctx, "the records are not visible, but the authorizations are no longer pending", map[string]any{"error": cerr.Error()})
 	}
 
 	for _, c := range challenges {
 		if _, aerr := client.Accept(ctx, c.chal); aerr != nil {
+			// An order running at the same time for the same name may have been validated
+			// by now: the authorization is then no longer pending and the answer is an error.
+			a, gerr := client.GetAuthorization(ctx, c.authz)
+			if gerr == nil && (a.Status == xacme.StatusValid || a.Status == xacme.StatusProcessing) {
+				tflog.Debug(ctx, "the challenge was accepted by another order", map[string]any{"identifier": c.name, "status": a.Status})
+				continue
+			}
 			return Result{}, fmt.Errorf("cannot ask the certificate authority to validate %q: %w", c.name, aerr)
 		}
+		tflog.Debug(ctx, "asked the certificate authority to validate", map[string]any{"identifier": c.name})
 	}
 	for _, c := range challenges {
 		wctx, cancel := context.WithTimeout(ctx, o.WaitTimeout)
-		_, werr := client.WaitAuthorization(wctx, c.authz)
+		a, werr := client.WaitAuthorization(wctx, c.authz)
 		cancel()
 		if werr != nil {
+			tflog.Debug(ctx, "authorization did not become valid", map[string]any{"identifier": c.name})
 			return Result{}, fmt.Errorf("the certificate authority did not validate %q: %w", c.name, werr)
 		}
+		tflog.Debug(ctx, "authorization is valid", map[string]any{"identifier": c.name, "status": a.Status, "state": "valid"})
 	}
 
 	// The records are no longer needed. Remove them before finalizing, so that a failure
@@ -232,10 +295,12 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	if werr != nil {
 		return Result{}, fmt.Errorf("the order did not become ready: %w", werr)
 	}
+	tflog.Debug(ctx, "the order is ready to be finalized", map[string]any{"status": ready.Status})
 	chain, _, ferr := client.CreateOrderCert(ctx, ready.FinalizeURL, csr, true)
 	if ferr != nil {
 		return Result{}, fmt.Errorf("cannot finalize the order: %w", ferr)
 	}
+	tflog.Debug(ctx, "the order was finalized and the certificate downloaded", map[string]any{"certificates_in_chain": len(chain)})
 	if verr := acme.VerifyChain(chain, csr, o.Identifiers); verr != nil {
 		return Result{}, fmt.Errorf("the issued certificate was refused: %w", verr)
 	}
@@ -244,6 +309,7 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 		return Result{}, fmt.Errorf("cannot merge the issued certificate into %q (it was issued, but its key is discarded with the pending operation): %w", name, merr)
 	}
 	merged = true
+	tflog.Debug(ctx, "merged the issued certificate into Key Vault")
 	info, ierr := acme.Inspect(bundle.Cer)
 	if ierr != nil {
 		// The merge succeeded; nothing can be undone, so say what is wrong.

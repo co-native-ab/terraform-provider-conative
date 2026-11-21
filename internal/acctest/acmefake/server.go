@@ -65,6 +65,8 @@ type order struct {
 type issued struct {
 	chain [][]byte
 	leaf  *x509.Certificate
+	// accountID is the account whose order the certificate was issued for.
+	accountID string
 }
 
 // Server is the fake.
@@ -98,6 +100,9 @@ type Server struct {
 	// validAuthz holds the valid authorizations by account and identifier, which a later
 	// order of the same account reuses, as a real authority does for a while.
 	validAuthz map[string]*authz
+	// reusePending makes a new order reuse a pending authorization of the same account
+	// and identifier, as Let's Encrypt does.
+	reusePending bool
 }
 
 // Start serves the fake over HTTPS.
@@ -166,8 +171,17 @@ func (s *Server) ClearFailures() {
 	defer s.mu.Unlock()
 	s.failValidation = map[string]bool{}
 	s.wrongKey, s.failFinalize, s.fail5xx, s.rejectNonce, s.revokeRefused = false, false, 0, false, false
-	s.omitContact, s.omitCommonName = false, false
+	s.omitContact, s.omitCommonName, s.reusePending = false, false, false
 	s.validAuthz = map[string]*authz{}
+}
+
+// ReusePendingAuthorizations makes an order reuse the pending authorization of the same
+// account and identifier, which then has one challenge value for both orders, as Let's
+// Encrypt does.
+func (s *Server) ReusePendingAuthorizations(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reusePending = b
 }
 
 // ExpireAuthorizations forgets the valid authorizations, so that the next order has to
@@ -188,6 +202,15 @@ func (s *Server) ForgetAuthorization(identifier string) {
 			delete(s.validAuthz, k)
 		}
 	}
+}
+
+// ForgetAccounts removes every account, as an authority does that deleted them: a later
+// lookup by key finds none.
+func (s *Server) ForgetAccounts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accounts = map[string]*account{}
+	s.accountsByID = map[string]*account{}
 }
 
 // IssueWrongKey makes the fake issue certificates for another key than the one in the
@@ -446,7 +469,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, _ flattenedJWS, p
 	case parts[1] == "cert" && len(parts) == 3:
 		s.download(w, parts[2])
 	case parts[1] == "revoke-cert":
-		s.revoke(w, payload)
+		s.revoke(w, payload, acct)
 	default:
 		s.problem(w, problem{http.StatusNotFound, "malformed", "unknown path"})
 	}
@@ -541,6 +564,19 @@ func (s *Server) newOrder(w http.ResponseWriter, payload []byte, a *account) {
 			o.identifiers = append(o.identifiers, id.Value)
 			o.authzIDs = append(o.authzIDs, z.id)
 			continue
+		}
+		if s.reusePending {
+			var shared *authz
+			for _, z := range s.authzs {
+				if z.accountID == a.id && z.identifier == id.Value && z.status == "pending" {
+					shared = z
+				}
+			}
+			if shared != nil {
+				o.identifiers = append(o.identifiers, id.Value)
+				o.authzIDs = append(o.authzIDs, shared.id)
+				continue
+			}
 		}
 		z := &authz{id: s.newID("z"), accountID: a.id, identifier: id.Value, status: "pending"}
 		ch := &challenge{id: s.newID("c"), authzID: z.id, token: s.newID("t"), status: "pending"}
@@ -641,7 +677,12 @@ func (s *Server) respond(w http.ResponseWriter, id string, a *account) {
 		s.problem(w, problem{http.StatusUnauthorized, "unauthorized", "the challenge belongs to another account"})
 		return
 	}
-	if z.status == "pending" {
+	if z.status != "pending" {
+		// Like Let's Encrypt: a challenge can be answered only while its authorization is pending.
+		s.problem(w, problem{http.StatusBadRequest, "malformed", "Unable to update challenge :: authorization must be pending"})
+		return
+	}
+	{
 		sum := sha256.Sum256([]byte(ch.token + "." + a.thumb))
 		want := b64.EncodeToString(sum[:])
 		fqdn := "_acme-challenge." + strings.TrimPrefix(z.identifier, "*.")
@@ -709,7 +750,7 @@ func (s *Server) finalize(w http.ResponseWriter, id string, payload []byte, a *a
 		return
 	}
 	cid := s.newID("x")
-	s.certs[cid] = &issued{chain: chain, leaf: leaf}
+	s.certs[cid] = &issued{chain: chain, leaf: leaf, accountID: a.id}
 	o.certID = cid
 	o.finalized = true
 	s.reply(w, http.StatusOK, map[string]string{"Location": s.URL + "/acme/order/" + o.id}, s.orderJSON(o))
@@ -727,7 +768,22 @@ func (s *Server) download(w http.ResponseWriter, id string) {
 	_, _ = w.Write(ChainPEM(c.chain))
 }
 
-func (s *Server) revoke(w http.ResponseWriter, payload []byte) {
+// mayRevoke applies RFC 8555 section 7.6 to a request signed with an account key: the
+// account that issued the certificate may revoke it, and so may an account that holds
+// valid authorizations for every name in it.
+func (s *Server) mayRevoke(acct *account, c *issued) bool {
+	if acct.id == c.accountID {
+		return true
+	}
+	for _, name := range c.leaf.DNSNames {
+		if z := s.validAuthz[acct.id+"|"+name]; z == nil || z.status != "valid" {
+			return false
+		}
+	}
+	return len(c.leaf.DNSNames) > 0
+}
+
+func (s *Server) revoke(w http.ResponseWriter, payload []byte, acct *account) {
 	var req struct {
 		Certificate string `json:"certificate"`
 		Reason      int    `json:"reason"`
@@ -748,6 +804,11 @@ func (s *Server) revoke(w http.ResponseWriter, payload []byte) {
 	for _, c := range s.certs {
 		if !bytes.Equal(c.leaf.Raw, der) {
 			continue
+		}
+		if !s.mayRevoke(acct, c) {
+			s.problem(w, problem{http.StatusForbidden, "unauthorized",
+				"the account did not issue the certificate and holds no valid authorizations for all of its names"})
+			return
 		}
 		serial := c.leaf.SerialNumber.String()
 		if s.revoked[serial] {

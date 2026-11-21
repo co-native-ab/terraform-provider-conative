@@ -175,12 +175,13 @@ func TestFailuresCleanUp(t *testing.T) {
 		arm  func(e *env)
 		want string
 	}{
-		"validation fails":  {func(e *env) { e.acme.FailValidation("*.apps.example.net") }, "failed"},
-		"finalize fails":    {func(e *env) { e.acme.FailFinalize(true) }, "finalize"},
-		"wrong key":         {func(e *env) { e.acme.IssueWrongKey(true) }, "key of the signing request"},
-		"azure write fails": {func(e *env) { e.azure.FailWrites(true) }, "Azure DNS"},
-		"cloudflare fails":  {func(e *env) { e.cf.FailWrites(true) }, "Cloudflare"},
-		"never visible":     {func(e *env) { e.store.NeverPropagate("_acme-challenge.example.com") }, "did not become visible"},
+		"validation fails":              {func(e *env) { e.acme.FailValidation("*.apps.example.net") }, "failed"},
+		"finalize fails":                {func(e *env) { e.acme.FailFinalize(true) }, "finalize"},
+		"wrong key":                     {func(e *env) { e.acme.IssueWrongKey(true) }, "key of the signing request"},
+		"azure write fails":             {func(e *env) { e.azure.FailWrites(true) }, "Azure DNS"},
+		"cloudflare fails":              {func(e *env) { e.cf.FailWrites(true) }, "Cloudflare"},
+		"cloudflare commits then fails": {func(e *env) { e.cf.CommitThenFail(true) }, "Cloudflare"},
+		"never visible":                 {func(e *env) { e.store.NeverPropagate("_acme-challenge.example.com") }, "did not become visible"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

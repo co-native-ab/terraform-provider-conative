@@ -34,6 +34,15 @@ type APIError struct {
 	Status  int
 	Code    string
 	Message string
+	// InnerCode is the code of the inner error, for example ObjectIsDeletedButRecoverable.
+	InnerCode string
+}
+
+// DeletedButRecoverable reports whether Key Vault refused because the name belongs to a
+// soft-deleted object that can only be recovered or purged.
+func (e *APIError) DeletedButRecoverable() bool {
+	return e.Status == http.StatusConflict &&
+		(e.InnerCode == "ObjectIsDeletedButRecoverable" || strings.Contains(strings.ToLower(e.Message), "deleted but recoverable"))
 }
 
 func (e *APIError) Error() string {
@@ -123,12 +132,15 @@ func (c *Client) doURL(ctx context.Context, method, target, pathTemplate string,
 func parseError(status int, data []byte) error {
 	var e struct {
 		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Code       string `json:"code"`
+			Message    string `json:"message"`
+			InnerError struct {
+				Code string `json:"code"`
+			} `json:"innererror"`
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(data, &e)
-	return &APIError{Status: status, Code: e.Error.Code, Message: e.Error.Message}
+	return &APIError{Status: status, Code: e.Error.Code, Message: e.Error.Message, InnerCode: e.Error.InnerError.Code}
 }
 
 // sameHost reports whether a link returned by the service stays on the vault's host.

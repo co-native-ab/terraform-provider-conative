@@ -40,6 +40,13 @@ var (
 // current when an existing certificate was imported.
 const importedVersionKey = "imported_version"
 
+// issuedByKey is the private state key that records the registration (its
+// registration_id) whose account ordered the certificate in issued_version. Only that
+// account, or one that holds valid authorizations for every name, may revoke it
+// (RFC 8555 section 7.6), so destroy revokes with that account's key even when
+// registration_id has since moved to another account at the same authority.
+const issuedByKey = "issued_by"
+
 const defaultMinDaysRemaining = 30
 
 // NewACMECertificateResource returns the conative_acme_certificate resource.
@@ -373,6 +380,11 @@ func (r *acmeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 	state.NotAfter = types.StringValue(info.NotAfterString())
 	state.Thumbprint = types.StringValue(info.Thumbprint)
 	state.CommonName = types.StringValue(info.CommonName)
+	if info.CommonName == "" {
+		// The certificate has no subject common name (and the configuration, if any, does
+		// not name one that the certificate carries): record none.
+		state.CommonName = types.StringNull()
+	}
 	state.KeyType = types.StringValue(info.KeyType)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
@@ -380,11 +392,6 @@ func (r *acmeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 // namesSet turns read-back alternative names into a set. When the certificate has none,
 // the form already held (null or empty) is kept.
 func namesSet(names []string, current types.Set) types.Set {
-	if info.CommonName == "" {
-		// The certificate has no subject common name (and the configuration, if any, does
-		// not name one that the certificate carries): record none.
-		state.CommonName = types.StringNull()
-	}
 	if len(names) == 0 {
 		if current.IsNull() || current.IsUnknown() || len(current.Elements()) == 0 {
 			return current
@@ -473,6 +480,7 @@ func (a *acmeAccess) publishers(b dnsBlocks) (map[string]issuer.DNSPublisher, er
 		if err != nil {
 			return nil, err
 		}
+		c.SetRetryBase(a.env.retryBase)
 		for _, z := range b.Azure {
 			out[z.Block.String()] = azuredns.NewZonePublisher(c, z.Subscription, z.ResourceGroup, z.Zone)
 		}
@@ -559,10 +567,24 @@ func (r *acmeCertificateResource) order(ctx context.Context, plan *acmeCertifica
 	}
 	res, err := issuer.Issue(ctx, o)
 	if err != nil {
+		var left *issuer.LeftoverError
+		if errors.As(err, &left) {
+			diags.AddError("Cannot "+verb, plan.object()+": "+err.Error()+"\n\n"+leftoverNote(plan.CertificateName.ValueString()))
+			return issuer.Result{}, false
+		}
 		operationError(diags, verb, plan.object(), err)
 		return issuer.Result{}, false
 	}
 	return res, true
+}
+
+// leftoverNote explains the certificate that a failed first order leaves in Key Vault.
+func leftoverNote(name string) string {
+	return fmt.Sprintf("Key Vault now holds a certificate named %q that has no issued version: the order failed after "+
+		"the certificate was created there. It is kept on purpose, so the next apply of this configuration reuses it and "+
+		"issues the first version. If you abandon this configuration instead, remove it: delete the certificate in Key Vault "+
+		"and, where the vault allows it, purge it (a deleted certificate keeps its name reserved until it is purged or its "+
+		"retention period ends; recover it to use the name again).", name)
 }
 
 func (r *acmeCertificateResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -578,6 +600,7 @@ func (r *acmeCertificateResource) Create(ctx context.Context, req resource.Creat
 	vault, _ := acme.ParseVaultURL(plan.KeyVaultURL.ValueString())
 	applyIssued(&plan, vault, res)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, issuedByKey, mustJSON(plan.RegistrationID.ValueString()))...)
 	warnLifetime(ctx, &resp.Diagnostics, plan, res)
 }
 
@@ -600,6 +623,7 @@ func (r *acmeCertificateResource) Update(ctx context.Context, req resource.Updat
 	applyIssued(&plan, vault, res)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedVersionKey, nil)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, issuedByKey, mustJSON(plan.RegistrationID.ValueString()))...)
 	warnLifetime(ctx, &resp.Diagnostics, plan, res)
 }
 
@@ -631,6 +655,8 @@ func (r *acmeCertificateResource) Delete(ctx context.Context, req resource.Delet
 		if !r.revoke(ctx, access, kv, state, req.Private, &resp.Diagnostics) {
 			return
 		}
+	} else {
+		tflog.Debug(ctx, "revocation skipped", map[string]any{"reason": "revoke_on_destroy is false"})
 	}
 	if err := kv.DeleteCertificate(ctx, name); err != nil {
 		operationError(&resp.Diagnostics, "delete", state.object(), err)
@@ -652,16 +678,29 @@ func (r *acmeCertificateResource) revoke(ctx context.Context, access *acmeAccess
 	if imported != "" && imported == issued {
 		msg := fmt.Sprintf("Version %s of the certificate was issued elsewhere and imported, and this resource has not renewed it, "+
 			"so it is not revoked. It is deleted from Key Vault.", issued)
+		tflog.Debug(ctx, "revocation skipped", map[string]any{"reason": "the version was issued elsewhere and imported"})
 		tflog.Warn(ctx, msg)
 		diags.AddWarning("The imported certificate is not revoked", msg)
 		return !diags.HasError()
 	}
-	if state.RegistrationID.IsNull() {
+	// The account that ordered the certificate revokes it; registration_id may have moved
+	// to another account at the same authority since.
+	regID := state.RegistrationID.ValueString()
+	rawBy, d := private.GetKey(ctx, issuedByKey)
+	diags.Append(d...)
+	if len(rawBy) > 0 {
+		var by string
+		if json.Unmarshal(rawBy, &by) == nil && by != "" {
+			regID = by
+		}
+	}
+	if regID == "" {
 		diags.AddError("Cannot revoke the certificate", state.object()+": registration_id is not recorded; apply the configuration once before destroying")
 		return false
 	}
 	b, err := kv.GetCertificateVersion(ctx, state.CertificateName.ValueString(), issued)
 	if errors.Is(err, keyvault.ErrNotFound) {
+		tflog.Debug(ctx, "revocation skipped", map[string]any{"reason": "the issued version is gone from Key Vault"})
 		return true
 	}
 	if err != nil {
@@ -674,15 +713,24 @@ func (r *acmeCertificateResource) revoke(ctx context.Context, access *acmeAccess
 		return false
 	}
 	if info.NotAfter.Before(time.Now()) {
+		tflog.Debug(ctx, "revocation skipped", map[string]any{"reason": "the certificate has expired"})
 		tflog.Info(ctx, "the certificate has expired; it is not revoked")
 		return true
 	}
-	server, key, err := acme.ParseRegistrationID(state.RegistrationID.ValueString())
+	server, key, err := acme.ParseRegistrationID(regID)
 	if err != nil {
 		diags.AddError("Invalid registration_id", err.Error())
 		return false
 	}
 	reg, err := access.registration(ctx, server, key)
+	if errors.Is(err, keyvault.ErrNotFound) {
+		msg := fmt.Sprintf("The account key %s, whose account ordered version %s, no longer exists in Key Vault, so the certificate cannot be revoked "+
+			"(only that account, or one that holds valid authorizations for all its names, may revoke it). It is deleted from Key Vault without being revoked.", key.Name, issued)
+		tflog.Debug(ctx, "revocation skipped", map[string]any{"reason": "the account key that ordered the certificate is gone from Key Vault"})
+		tflog.Warn(ctx, msg)
+		diags.AddWarning("The certificate is not revoked", msg)
+		return true
+	}
 	if err != nil {
 		operationError(diags, "revoke", state.object(), err)
 		return false
@@ -691,6 +739,7 @@ func (r *acmeCertificateResource) revoke(ctx context.Context, access *acmeAccess
 		operationError(diags, "revoke", state.object(), err)
 		return false
 	}
+	tflog.Debug(ctx, "the certificate was revoked at the authority", map[string]any{"version": issued})
 	return true
 }
 

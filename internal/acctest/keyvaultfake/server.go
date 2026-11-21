@@ -100,17 +100,18 @@ type Server struct {
 
 	token string
 
-	mu         sync.Mutex
-	keys       map[string]*keyEntry // "name/version"
-	keyList    []*keyEntry
-	certs      map[string]*certificate
-	allKeys    []crypto.Signer
-	violations []string
-	failStatus int
-	reader     bool
-	otherCA    *x509.Certificate
-	otherKey   *ecdsa.PrivateKey
-	serial     int64
+	mu             sync.Mutex
+	keys           map[string]*keyEntry // "name/version"
+	keyList        []*keyEntry
+	certs          map[string]*certificate
+	allKeys        []crypto.Signer
+	violations     []string
+	failStatus     int
+	reader         bool
+	forbidKeyReads bool
+	otherCA        *x509.Certificate
+	otherKey       *ecdsa.PrivateKey
+	serial         int64
 }
 
 // vaultHost is the name the fake is addressed by: the provider accepts only Key Vault
@@ -209,6 +210,27 @@ func (s *Server) SetKeyEnabled(name string, enabled bool) {
 			k.enabled = enabled
 		}
 	}
+}
+
+// DeleteKey removes every version of a key from outside the provider, so that reading
+// or using it answers 404.
+func (s *Server) DeleteKey(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, e := range s.keys {
+		if e.name == name {
+			delete(s.keys, k)
+		}
+	}
+	s.keyList = slices.DeleteFunc(s.keyList, func(e *keyEntry) bool { return e.name == name })
+}
+
+// ForbidKeyReads makes reading a key answer 403, as a caller without the right to read
+// keys gets. Everything else keeps working.
+func (s *Server) ForbidKeyReads(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forbidKeyReads = b
 }
 
 // SetFailure makes every request answer with the given status (0 turns it off).
@@ -550,6 +572,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	switch {
 	case len(parts) == 3 && parts[0] == "keys" && r.Method == http.MethodGet:
+		if s.forbidKeyReads {
+			apiError(w, http.StatusForbidden, "Forbidden", "the caller is not authorized to read keys")
+			return
+		}
 		s.getKey(w, parts[1], parts[2])
 	case len(parts) == 4 && parts[0] == "keys" && parts[3] == "sign" && r.Method == http.MethodPost:
 		s.sign(w, r, parts[1], parts[2])
@@ -790,7 +816,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, name string) {
 	}
 	c := s.certs[name]
 	if c != nil && c.deleted {
-		apiError(w, http.StatusConflict, "Conflict", "the certificate is deleted but recoverable; recover or purge it first")
+		writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{
+			"code": "Conflict", "message": "the certificate is currently in a deleted but recoverable state, and its name cannot be reused; in this state, the certificate can only be recovered or purged",
+			"innererror": map[string]string{"code": "ObjectIsDeletedButRecoverable"},
+		}})
 		return
 	}
 	if c != nil && c.pending.inProgress() {

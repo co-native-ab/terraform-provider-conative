@@ -146,7 +146,7 @@ func TestAccACMECertificate_deletedOutsideTerraform(t *testing.T) {
 				PreConfig:       func() { acc.KeyVault.SoftDelete(f.Cert) },
 				ConfigVariables: acmeVariables(),
 				Config:          f.config(tweaks),
-				ExpectError:     regexp.MustCompile(`(?s)deleted\s+but\s+recoverable`),
+				ExpectError:     regexp.MustCompile(`(?s)deleted\s+but\s+recoverable.*recover\s+or\s+purge\s+the\s+deleted\s+certificate`),
 			},
 			{
 				PreConfig:       func() { acc.KeyVault.Purge(f.Cert) },

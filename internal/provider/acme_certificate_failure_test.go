@@ -322,3 +322,73 @@ func TestAccACMEProvider_propagationTimeoutOutOfRange(t *testing.T) {
 		})
 	}
 }
+
+// A first order that fails leaves the Key Vault certificate without an issued version. It
+// is kept on purpose: the error says so and a retry of the same configuration reuses it.
+func TestAccACMECertificate_failedFirstCreateKeepsCertificate(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	cleanup := assertCleanup(t, f.Cert)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				PreConfig:       func() { acc.ACME.FailFinalize(true) },
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+				ExpectError: regexp.MustCompile(`(?s)Key\s+Vault\s+now\s+holds\s+a\s+certificate\s+named\s+"` + f.Cert +
+					`"\s+that\s+has\s+no\s+issued\s+version.*next\s+apply.*reuses\s+it.*delete.*purge`),
+			},
+			{
+				PreConfig: func() {
+					cleanup()
+					if !acc.KeyVault.Exists(f.Cert) || vaultVersions(f.Cert) != 0 {
+						t.Errorf("the certificate should exist without an issued version (exists %t, issued versions %d)",
+							acc.KeyVault.Exists(f.Cert), vaultVersions(f.Cert))
+					}
+					acc.ACME.ClearFailures()
+				},
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+				Check: resource.ComposeTestCheckFunc(
+					func(*terraform.State) error {
+						if n := vaultVersions(f.Cert); n != 1 {
+							return fmt.Errorf("%d issued versions after the retry, want 1", n)
+						}
+						return nil
+					},
+					dnsClean(),
+				),
+			},
+		},
+	})
+}
+
+// When the authority no longer knows the account, the error names the way out.
+func TestAccACMECertificate_accountGone(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Revoke: "false"}
+	renew := tweaks
+	renew.MinDays = 100
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
+			{
+				PreConfig:       func() { acc.ACME.SetValidity(365 * 24 * time.Hour); acc.ACME.ForgetAccounts() },
+				ConfigVariables: acmeVariables(), Config: f.config(renew),
+				ExpectError: regexp.MustCompile(`(?s)no\s+account\s+for\s+the\s+registration.*terraform\s+apply\s+-replace=`),
+			},
+			{
+				// A renewal that fails before it touches Key Vault leaves it as it was.
+				PreConfig: func() {
+					if n := vaultVersions(f.Cert); n != 1 {
+						t.Errorf("%d issued versions, want 1", n)
+					}
+					acc.ACME.SetValidity(90 * 24 * time.Hour)
+				},
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks), PlanOnly: true,
+			},
+		},
+	})
+}

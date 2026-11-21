@@ -113,7 +113,7 @@ func TestAccACMERegistration_readOnlyPlanAndRefresh(t *testing.T) {
 				ConfigVariables: acmeVariables(), Config: reader, PlanOnly: true,
 			},
 			{
-				// A key that Key Vault confirms is gone removes the registration from the state.
+				// The reader's plan wrote nothing and signed nothing; the full rights come back.
 				PreConfig: func() {
 					requireReadOnlyTraffic(t, &mark)()
 					acc.KeyVault.SetReader(false)
@@ -347,12 +347,10 @@ func TestAccACMECertificate_commonNameTooLong(t *testing.T) {
 	})
 }
 
-// Moving the registration to another certificate authority URL orders a new certificate;
-// another account at the same URL, or the first value after an import, only updates the state.
-func TestAccACMECertificate_authorityChangeOrders(t *testing.T) {
-	accPreCheck(t)
-	f := newACMEFixture(t, "P256")
-	otherKey := acc.KeyVault.AddKey(uniqueName("acct"), "P256", true)
+// authorityChangeConfig is the configuration of the registration-change tests: the main
+// registration, one at the alternate directory URL with the same account key, and one at
+// the same URL with another account key.
+func authorityChangeConfig(f acmeFixture, otherKey string) func(reg string) string {
 	extra := fmt.Sprintf(`
 resource "conative_acme_registration" "alt" {
   server_url     = %q
@@ -364,9 +362,20 @@ resource "conative_acme_registration" "alt_other_key" {
   account_key_id = %q
 }
 `, acc.ACME.AlternateDirectoryURL(), f.KeyID, acc.ACME.AlternateDirectoryURL(), otherKey)
-	opts := func(reg string) string {
+	return func(reg string) string {
 		return acmeProviderConfig() + f.registrationHCL("") + extra + f.certHCL(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Registrat: reg})
 	}
+}
+
+// Moving the registration to another certificate authority URL orders a new certificate;
+// another account at the same URL, or the first value after an import, only updates the
+// state. The certificate is revoked by the account that issued it, not by the account
+// registration_id names at the time of the destroy.
+func TestAccACMECertificate_authorityChangeOrders(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	otherKey := acc.KeyVault.AddKey(uniqueName("acct"), "P256", true)
+	opts := authorityChangeConfig(f, otherKey)
 	action := func(a plancheck.ResourceActionType) resource.ConfigPlanChecks {
 		return resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(certAddr, a)}}
 	}
@@ -379,13 +388,24 @@ resource "conative_acme_registration" "alt_other_key" {
 		}
 	}
 	var kvMark int
+	var serial string
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
+		CheckDestroy: func(*terraform.State) error {
+			if !slices.Contains(acc.ACME.Revoked(), serial) {
+				return fmt.Errorf("the certificate (serial %s) was not revoked by the account that issued it", serial)
+			}
+			return nil
+		},
 		Steps: []resource.TestStep{
 			{ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.r.id"), Check: versions(1)},
 			{
 				ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.alt.id"),
-				ConfigPlanChecks: action(plancheck.ResourceActionUpdate), Check: versions(2),
+				ConfigPlanChecks: action(plancheck.ResourceActionUpdate),
+				Check: resource.ComposeTestCheckFunc(versions(2), func(s *terraform.State) (err error) {
+					serial, err = serialOf(s)
+					return err
+				}),
 			},
 			{
 				PreConfig:       func() { kvMark = acc.KeyVault.Journal.Mark() },
@@ -400,6 +420,44 @@ resource "conative_acme_registration" "alt_other_key" {
 			},
 		},
 	})
+}
+
+// When the key of the account that issued the certificate is gone, destroy cannot
+// revoke it: it warns and deletes the certificate.
+func TestAccACMECertificate_destroyWhenIssuingKeyIsGone(t *testing.T) {
+	accPreCheck(t)
+	logFile := acctest.EnableTraceLogs(t, t.TempDir())
+	f := newACMEFixture(t, "P256")
+	otherKey := acc.KeyVault.AddKey(uniqueName("acct"), "P256", true)
+	opts := authorityChangeConfig(f, otherKey)
+	var serial string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		CheckDestroy: func(*terraform.State) error {
+			if slices.Contains(acc.ACME.Revoked(), serial) {
+				return fmt.Errorf("the certificate was revoked although its issuing key is gone")
+			}
+			if !acc.KeyVault.Deleted(f.Cert) {
+				return fmt.Errorf("the certificate was not deleted")
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.r.id")},
+			{
+				// Another authority URL orders a new certificate with the same account key.
+				ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.alt.id"),
+				Check: func(s *terraform.State) (err error) { serial, err = serialOf(s); return err },
+			},
+			{ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.alt_other_key.id")},
+			{
+				PreConfig:       func() { acc.KeyVault.DeleteKey(f.KeyName) },
+				ConfigVariables: acmeVariables(), Config: opts("conative_acme_registration.alt_other_key.id"),
+				Destroy: true,
+			},
+		},
+	})
+	acctest.AssertLogContains(t, logFile, "no longer exists in Key Vault")
 }
 
 // A failed renewal leaves the state as it was; a leftover pending version does not confuse
@@ -484,6 +542,61 @@ func TestAccACMECertificate_failedRenewalAndAuthorizationReuse(t *testing.T) {
 					}
 					return nil
 				},
+			},
+		},
+	})
+}
+
+// A key that Key Vault says is gone removes the registration from the state: the plan
+// creates it again, and neither the plan nor the refresh signs or calls the authority.
+func TestAccACMERegistration_keyGoneIsPlannedAsCreate(t *testing.T) {
+	accPreCheck(t)
+	setupDNS(t)
+	keyName := uniqueName("acct")
+	keyID := acc.KeyVault.AddKey(keyName, "P256", true)
+	cfg := registrationConfig(acc.ACME.DirectoryURL(), keyID, `email = "a@example.com"`)
+	var mark acctest.Mark
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: cfg},
+			{
+				PreConfig:       func() { acc.KeyVault.DeleteKey(keyName); mark = acc.Mark() },
+				ConfigVariables: acmeVariables(), Config: cfg, PlanOnly: true, ExpectNonEmptyPlan: true,
+			},
+			{
+				PreConfig: func() {
+					for _, r := range acc.RequestsSince(mark) {
+						if strings.Contains(r, "/sign") || strings.HasPrefix(r, "acme ") {
+							t.Errorf("the plan made a request that signs or calls the authority: %s", r)
+						}
+					}
+				},
+				ConfigVariables: acmeVariables(), Config: cfg, PlanOnly: true, ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+// A caller that may not read keys gets an error, never a registration that disappears.
+func TestAccACMERegistration_keyReadForbiddenKeepsState(t *testing.T) {
+	accPreCheck(t)
+	setupDNS(t)
+	t.Cleanup(func() { acc.KeyVault.ForbidKeyReads(false) })
+	keyID := acc.KeyVault.AddKey(uniqueName("acct"), "P256", true)
+	cfg := registrationConfig(acc.ACME.DirectoryURL(), keyID, ``)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: cfg},
+			{
+				PreConfig:       func() { acc.KeyVault.ForbidKeyReads(true) },
+				ConfigVariables: acmeVariables(), Config: cfg, PlanOnly: true,
+				ExpectError: regexp.MustCompile(`(?s)Key\s+Vault\s+answered\s+403`),
+			},
+			{
+				PreConfig:       func() { acc.KeyVault.ForbidKeyReads(false) },
+				ConfigVariables: acmeVariables(), Config: cfg, PlanOnly: true,
 			},
 		},
 	})
