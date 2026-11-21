@@ -95,10 +95,16 @@ type Server struct {
 	allKeys    []crypto.Signer
 	violations []string
 	failStatus int
+	reader     bool
 	otherCA    *x509.Certificate
 	otherKey   *ecdsa.PrivateKey
 	serial     int64
 }
+
+// vaultHost is the name the fake is addressed by: the provider accepts only Key Vault
+// names. Clients reach the loopback listener through a dialer that maps names under
+// vault.azure.net (acctest.Certs.HTTPClientWithVault).
+const vaultHost = "fake.vault.azure.net"
 
 // Start serves the fake over HTTPS. Only requests with the bearer token are accepted.
 func Start(cert tls.Certificate, token string) (*Server, error) {
@@ -124,6 +130,7 @@ func Start(cert tls.Certificate, token string) (*Server, error) {
 		otherCA: ca, otherKey: caKey,
 	}
 	s.Server = fakehttp.StartTLS(http.HandlerFunc(s.handle), cert)
+	s.SetHost(vaultHost)
 	return s, nil
 }
 
@@ -197,6 +204,16 @@ func (s *Server) SetFailure(status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failStatus = status
+}
+
+// SetReader switches the vault to the rights of a read-only caller: the sign operation,
+// every secrets request and every write to a key or a certificate (create, merge,
+// delete) answer 403, and reads still work. Requests are journaled as usual, so a test
+// can prove the provider did not even try.
+func (s *Server) SetReader(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reader = on
 }
 
 // PrivateKeysDER returns every private key the fake generated or holds, as PKCS #8 DER.
@@ -471,6 +488,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		apiError(w, s.failStatus, "ServiceUnavailable", "the vault is failing (test control)")
 		return
 	}
+	if s.reader && (r.Method != http.MethodGet || strings.Contains(path, "/secrets") || strings.HasSuffix(path, "/sign")) {
+		apiError(w, http.StatusForbidden, "Forbidden", "the caller is not authorized to perform this operation (reader mode)")
+		return
+	}
 	if r.URL.Query().Get("api-version") != "7.5" {
 		apiError(w, http.StatusBadRequest, "BadParameter", "unexpected api-version")
 		return
@@ -640,10 +661,8 @@ func (s *Server) certificate(w http.ResponseWriter, r *http.Request, parts []str
 			notFound()
 			return
 		}
-		if v := latestIssued(c); v != nil {
-			writeJSON(w, http.StatusOK, s.bundle(c, v))
-			return
-		}
+		// Like Key Vault, answer with the latest version, even when it is still pending (it
+		// then has no certificate).
 		writeJSON(w, http.StatusOK, s.bundle(c, c.versions[len(c.versions)-1]))
 	case len(parts) == 2 && r.Method == http.MethodGet:
 		if c == nil || c.deleted {

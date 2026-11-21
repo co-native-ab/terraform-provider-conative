@@ -29,7 +29,7 @@ func start(t *testing.T) (*keyvaultfake.Server, *keyvault.Client, *acctest.Certs
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.Close)
-	c, err := keyvault.New(srv.URL, token, certs.HTTPClient())
+	c, err := keyvault.New(srv.URL, token, certs.HTTPClientWithVault())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestErrorsNameStatusCodeAndMessageButNeverTheToken(t *testing.T) {
 	}
 	srv.SetFailure(0)
 
-	wrong, _ := keyvault.New(srv.URL, "another-token", certs.HTTPClient())
+	wrong, _ := keyvault.New(srv.URL, "another-token", certs.HTTPClientWithVault())
 	if _, err = wrong.GetCertificate(ctx, "x"); err == nil || !strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "another-token") {
 		t.Errorf("a wrong token: %v", err)
 	}

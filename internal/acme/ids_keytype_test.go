@@ -12,9 +12,9 @@ import (
 func TestVaultURL(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"https://example.vault.azure.net":  "https://example.vault.azure.net",
-		"https://Example.vault.azure.net/": "https://example.vault.azure.net",
-		"https://localhost:8443":           "https://localhost:8443",
+		"https://example.vault.azure.net":      "https://example.vault.azure.net",
+		"https://Example.vault.azure.net/":     "https://example.vault.azure.net",
+		"https://example.vault.azure.net:8443": "https://example.vault.azure.net:8443",
 	} {
 		if got, err := ParseVaultURL(in); err != nil || got != want {
 			t.Errorf("%q: %q, %v", in, got, err)
@@ -23,6 +23,9 @@ func TestVaultURL(t *testing.T) {
 	for _, bad := range []string{
 		"http://example.vault.azure.net", "https://user@example.vault.azure.net", "https://example.vault.azure.net/keys",
 		"https://example.vault.azure.net?x=1", "https://example.vault.azure.net#f", "example.vault.azure.net", "",
+		// Only vault names under vault.azure.net receive an access token.
+		"https://example.vault.azure.com/", "https://vault.azure.net", "https://evilvault.azure.net", "https://example.vault.azure.net.example.com",
+		"https://localhost:8443", "https://127.0.0.1", "https://example.vault.usgovcloudapi.net",
 	} {
 		if _, err := ParseVaultURL(bad); err == nil {
 			t.Errorf("%q accepted", bad)
@@ -48,6 +51,16 @@ func TestKeyAndCertificateIDs(t *testing.T) {
 	} {
 		if _, err := ParseKeyID(bad); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+	for _, bad := range []string{"https://example.vault.azure.com/keys/a/b", "https://localhost/keys/a/b", "https://example.vault.azure.net.example.com/keys/a/b"} {
+		if _, err := ParseKeyID(bad); err == nil {
+			t.Errorf("key ID %q accepted", bad)
+		}
+	}
+	for _, bad := range []string{"https://example.vault.azure.com/certificates/a", "https://localhost/certificates/a"} {
+		if _, _, err := ParseCertificateImportID(bad); err == nil {
+			t.Errorf("import ID %q accepted", bad)
 		}
 	}
 	v, n, err := ParseCertificateImportID("https://example.vault.azure.net/certificates/example-com")

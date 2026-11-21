@@ -16,13 +16,31 @@ var (
 	emailRE   = regexp.MustCompile(`^[^\s@,]+@[^\s@,]+$`)
 )
 
-// ParseVaultURL validates a Key Vault URL, https://<host>[:port] with an optional single
-// trailing "/", and returns it without the trailing slash and with a lower-case host.
+// vaultHostSuffix is the DNS suffix of every Key Vault in the public Azure cloud. The
+// provider sends access tokens only to hosts under it.
+const vaultHostSuffix = ".vault.azure.net"
+
+// checkVaultHost refuses a host that is not a vault name under vaultHostSuffix, so that a
+// mistyped or hostile URL never receives an access token.
+func checkVaultHost(u *url.URL) error {
+	host := strings.ToLower(u.Hostname())
+	if len(host) <= len(vaultHostSuffix) || !strings.HasSuffix(host, vaultHostSuffix) {
+		return fmt.Errorf("the host must be a Key Vault name ending in %s", vaultHostSuffix)
+	}
+	return nil
+}
+
+// ParseVaultURL validates a Key Vault URL, https://<name>.vault.azure.net[:port] with an
+// optional single trailing "/", and returns it without the trailing slash and with a
+// lower-case host.
 func ParseVaultURL(s string) (string, error) {
 	const msg = "must be a Key Vault URL such as https://example.vault.azure.net/"
 	u, err := parseHTTPS(s)
 	if err != nil {
 		return "", fmt.Errorf("%q %s", s, msg)
+	}
+	if err := checkVaultHost(u); err != nil {
+		return "", fmt.Errorf("%q %s: %w", s, msg, err)
 	}
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("%q %s", s, msg)
@@ -87,6 +105,9 @@ func ParseKeyID(s string) (KeyRef, error) {
 	if err != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return KeyRef{}, fmt.Errorf("%q %s", s, msg)
 	}
+	if err := checkVaultHost(u); err != nil {
+		return KeyRef{}, fmt.Errorf("%q %s: %w", s, msg, err)
+	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
 	if len(parts) == 2 && parts[0] == "keys" && nameRE.MatchString(parts[1]) {
 		return KeyRef{}, fmt.Errorf("%q has no version; use the versioned ID, for example the id attribute of azurerm_key_vault_key: %s", s, msg)
@@ -109,6 +130,9 @@ func ParseCertificateImportID(s string) (vault, name string, err error) {
 	u, perr := parseHTTPS(s)
 	if perr != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", "", fmt.Errorf("%q %s", s, msg)
+	}
+	if err := checkVaultHost(u); err != nil {
+		return "", "", fmt.Errorf("%q %s: %w", s, msg, err)
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
 	if len(parts) != 2 || parts[0] != "certificates" || !nameRE.MatchString(parts[1]) {

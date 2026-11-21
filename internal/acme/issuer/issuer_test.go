@@ -47,7 +47,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{store: dnsstore.New(), client: certs.HTTPClient()}
+	e := &env{store: dnsstore.New(), client: certs.HTTPClientWithVault()}
 	if e.acme, err = acmefake.Start(certs.Server, e.store); err != nil {
 		t.Fatal(err)
 	}

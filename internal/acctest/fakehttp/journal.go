@@ -82,6 +82,12 @@ func StartTLS(h http.Handler, cert tls.Certificate) *Server {
 	return s
 }
 
+// SetHost makes URL use another host name, for a fake that stands in for a service whose
+// clients only accept certain host names. The server still listens on the loopback
+// interface; clients reach it through a dialer that maps the name (see
+// acctest.Certs.HTTPClientWithVault).
+func (s *Server) SetHost(host string) { s.URL = fmt.Sprintf("https://%s:%d", host, s.port) }
+
 // Port returns the TCP port the server listens on.
 func (s *Server) Port() int { return s.port }
 

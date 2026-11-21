@@ -32,7 +32,7 @@ func start(t *testing.T) (*keyvaultfake.Server, *keyvault.Client) {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.Close)
-	c, err := keyvault.New(srv.URL, token, certs.HTTPClient())
+	c, err := keyvault.New(srv.URL, token, certs.HTTPClientWithVault())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,9 +122,14 @@ func TestImportedCertificatesAreNotInTheJournal(t *testing.T) {
 	if p := srv.Policy("imported"); p.Issuer != "Unknown" || !p.Exportable || p.Curve != "P-384" || len(p.LifetimeActions) != 0 {
 		t.Errorf("the policy was not replaced: %+v", p)
 	}
+	// Until the merge the versionless get returns the latest version, which is the pending
+	// one and has no certificate; the imported version is still listed as issued.
 	latest, _ := c.GetCertificate(ctx, "imported")
-	if latest.Version != version {
-		t.Errorf("until the merge the versionless get returns the imported version, got %s", latest.Version)
+	if latest.Version == version || len(latest.Cer) != 0 || latest.Issued {
+		t.Errorf("until the merge the versionless get returns the pending version, got %+v", latest)
+	}
+	if got := srv.LeafDER("imported", ""); len(got) == 0 {
+		t.Error("the imported version is no longer the latest issued one")
 	}
 	if v := srv.Violations(); len(v) != 0 {
 		t.Errorf("violations: %v", v)
@@ -170,7 +175,7 @@ func TestViolationsAreRecorded(t *testing.T) {
 	for _, path := range []string{"/secrets/x", "/keys/x/export", "/certificates/x/policy"} {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+path+"?api-version=7.5", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := certs.HTTPClient().Do(req)
+		resp, err := certs.HTTPClientWithVault().Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,5 +183,39 @@ func TestViolationsAreRecorded(t *testing.T) {
 	}
 	if got := srv.Violations(); len(got) != 3 {
 		t.Errorf("violations: %v", got)
+	}
+}
+
+func TestReaderModeRejectsSignAndWrites(t *testing.T) {
+	srv, c := start(t)
+	ctx := context.Background()
+	keyID := srv.AddKey("k", "P256", true)
+	key, err := acme.ParseKeyID(keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.ImportCertificate("c", keyvaultfake.ImportOptions{Issuer: "Self", Key: "P256", CommonName: "example.com", DNSNames: []string{"example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetReader(true)
+	if _, err := c.GetKey(ctx, key.Name, key.Version); err != nil {
+		t.Errorf("reading a key: %v", err)
+	}
+	if _, err := c.GetCertificate(ctx, "c"); err != nil {
+		t.Errorf("reading a certificate: %v", err)
+	}
+	var api *keyvault.APIError
+	if _, err := c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32)); !errors.As(err, &api) || api.Status != http.StatusForbidden {
+		t.Errorf("sign: %v", err)
+	}
+	if _, err := c.CreateCertificate(ctx, "n", policy(t, "example.com", []string{"example.com"}, "P256")); !errors.As(err, &api) || api.Status != http.StatusForbidden {
+		t.Errorf("create: %v", err)
+	}
+	if err := c.DeleteCertificate(ctx, "c"); !errors.As(err, &api) || api.Status != http.StatusForbidden {
+		t.Errorf("delete: %v", err)
+	}
+	srv.SetReader(false)
+	if _, err := c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32)); err != nil {
+		t.Errorf("sign after reader mode: %v", err)
 	}
 }
