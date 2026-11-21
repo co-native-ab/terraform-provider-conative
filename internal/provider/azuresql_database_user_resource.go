@@ -154,22 +154,27 @@ func (r *databaseUserResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
+	// The user exists from here on. Whatever happens next, record it in state so
+	// Terraform marks the resource tainted and replaces or destroys it next run.
+	plan.ID = types.StringValue(azuresql.UserID(database, name))
 	user, found, err := readUser(ctx, client, database, name)
-	if err != nil {
+	switch {
+	case err != nil:
+		plan.SID, plan.PrincipalType = types.StringNull(), types.StringNull()
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		operationError(&resp.Diagnostics, "read back", object, err)
 		return
-	}
-	if !found {
+	case !found:
+		plan.SID, plan.PrincipalType = types.StringNull(), types.StringNull()
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		operationError(&resp.Diagnostics, "read back", object, fmt.Errorf("the user was not found after it was created"))
 		return
 	}
-	plan.ID = types.StringValue(azuresql.UserID(database, name))
 	applyUser(&plan, user)
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 	if user.EntraID == nil || !strings.EqualFold(*user.EntraID, plan.EntraID.ValueString()) {
 		operationError(&resp.Diagnostics, "read back", object, fmt.Errorf("the database reports a different identifier than the one created"))
-		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *databaseUserResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

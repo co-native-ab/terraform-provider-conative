@@ -194,6 +194,10 @@ func (r *databasePermissionResource) Create(ctx context.Context, req resource.Cr
 		operationError(&resp.Diagnostics, "set", plan.object(), err)
 		return
 	}
+	// The statement succeeded. Record the permission in state before reporting any
+	// read-back problem, so Terraform marks it tainted and revokes it next run.
+	plan.ID = types.StringValue(id)
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 	reported, found, err := readPermissionState(ctx, client, database, p)
 	if err != nil {
 		operationError(&resp.Diagnostics, "read back", plan.object(), err)
@@ -202,10 +206,7 @@ func (r *databasePermissionResource) Create(ctx context.Context, req resource.Cr
 	if !found || reported != p.State {
 		operationError(&resp.Diagnostics, "read back", plan.object(),
 			fmt.Errorf("the database reports state %q (found: %t) instead of %s", reported, found, p.State))
-		return
 	}
-	plan.ID = types.StringValue(id)
-	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 // existingImportState is the state to put in an import ID for an existing permission.
@@ -234,6 +235,7 @@ func (r *databasePermissionResource) Read(ctx context.Context, req resource.Read
 		return
 	}
 	state.State = types.StringValue(reported)
+	state.ID = types.StringValue(azuresql.PermissionID(database, p.Principal, reported, p.Permission, p.Schema))
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
