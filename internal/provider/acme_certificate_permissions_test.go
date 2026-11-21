@@ -96,6 +96,7 @@ func TestGuideListsTheDocumentedActions(t *testing.T) {
 // deleting it included, as certificates/create/action alone.
 func TestAccACMECertificate_orderWithDocumentedRights(t *testing.T) {
 	accPreCheck(t)
+	t.Cleanup(acc.KeyVault.GrantAll)
 	f := newACMEFixture(t, "P256")
 	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	finished := tweaks
@@ -178,6 +179,7 @@ func TestAccACMECertificate_orderNeedsEveryDocumentedRight(t *testing.T) {
 	accPreCheck(t)
 	for _, missing := range documentedOrderActions {
 		t.Run("without "+shortAction(missing), func(t *testing.T) {
+			t.Cleanup(acc.KeyVault.GrantAll)
 			f := newACMEFixture(t, "P256")
 			tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 			renew := tweaks
@@ -207,6 +209,7 @@ func TestAccACMECertificate_orderNeedsEveryDocumentedRight(t *testing.T) {
 // of them, on top of the documented set, succeeds and deletes the pending operation.
 func TestAccACMECertificate_orderNeedsNoUpdateOrDeleteRight(t *testing.T) {
 	accPreCheck(t)
+	t.Cleanup(acc.KeyVault.GrantAll)
 	for _, granted := range documentedOrderActions {
 		if granted == keyvaultfake.ActionCertificatesUpdate || granted == keyvaultfake.ActionCertificatesDelete {
 			t.Fatalf("the documented order set lists %s", shortAction(granted))
@@ -248,7 +251,8 @@ func TestAccACMECertificate_orderNeedsNoUpdateOrDeleteRight(t *testing.T) {
 }
 
 // Destroy with revoke_on_destroy = true works with exactly the documented rights, and
-// fails without keys/read: the account key is read to sign the revocation.
+// fails without keys/read: the account key is read to sign the revocation (and, in this
+// configuration, already by the refresh of the registration that precedes the destroy).
 func TestAccACMECertificate_revokeDestroyWithDocumentedRights(t *testing.T) {
 	accPreCheck(t)
 	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Revoke: "true"}
