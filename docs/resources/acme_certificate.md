@@ -155,9 +155,11 @@ policy, and it changes nothing.
 ## Permissions
 
 See [Permissions](../guides/acme-certificates-in-key-vault#permissions) in the guide for the minimum
-Azure RBAC data actions per operation: refresh, import and plan need only `certificates/read`; ordering,
-renewing and destroying need more, and nothing ever reads a secret. The guide also explains how to force a
-renewal and exactly what `revoke_on_destroy` revokes.
+Azure RBAC data actions per operation. Refresh, import and plan need only `certificates/read` in Key Vault,
+also when an order is due (such a plan also reads the DNS zones). They never touch the certificate's pending
+operation, which Key Vault authorises as `certificates/create/action` even for a read. Ordering, renewing and
+destroying need more, and nothing ever reads a secret. The guide also explains how to force a renewal and
+exactly what `revoke_on_destroy` revokes.
 
 ## Import
 

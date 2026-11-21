@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest"
@@ -186,7 +187,7 @@ func TestViolationsAreRecorded(t *testing.T) {
 	}
 }
 
-func TestReaderModeRejectsSignAndWrites(t *testing.T) {
+func TestReaderModeAuthorisesPerDataAction(t *testing.T) {
 	srv, c := start(t)
 	ctx := context.Background()
 	keyID := srv.AddKey("k", "P256", true)
@@ -197,25 +198,82 @@ func TestReaderModeRejectsSignAndWrites(t *testing.T) {
 	if _, err := srv.ImportCertificate("c", keyvaultfake.ImportOptions{Issuer: "Self", Key: "P256", CommonName: "example.com", DNSNames: []string{"example.com"}}); err != nil {
 		t.Fatal(err)
 	}
+	srv.AddPendingOperation("p", "Unknown")
+	mark := srv.ForbiddenMark()
 	srv.SetReader(true)
+
+	// Reading certificates, versions and keys is allowed.
 	if _, err := c.GetKey(ctx, key.Name, key.Version); err != nil {
 		t.Errorf("reading a key: %v", err)
 	}
 	if _, err := c.GetCertificate(ctx, "c"); err != nil {
 		t.Errorf("reading a certificate: %v", err)
 	}
+	if _, err := c.ListVersions(ctx, "c"); err != nil {
+		t.Errorf("listing versions: %v", err)
+	}
+	if got := srv.ForbiddenSince(mark); len(got) != 0 {
+		t.Errorf("reads were refused: %v", got)
+	}
+
+	// Reading a pending operation needs certificates/create/action, as in Key Vault.
 	var api *keyvault.APIError
-	if _, err := c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32)); !errors.As(err, &api) || api.Status != http.StatusForbidden {
+	_, err = c.GetPending(ctx, "c")
+	if !errors.As(err, &api) || api.Status != http.StatusForbidden || api.Code != "Forbidden" ||
+		!strings.Contains(api.Message, "Action: 'Microsoft.KeyVault/vaults/certificates/create/action'") {
+		t.Errorf("get pending: %v", err)
+	}
+	refused := func(what string, err error, action string) {
+		t.Helper()
+		if !errors.As(err, &api) || api.Status != http.StatusForbidden || !strings.Contains(api.Message, "Action: '"+action+"'") {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+	refused("delete pending", c.DeletePending(ctx, "p"), keyvaultfake.ActionCertificatesCreate)
+	_, err = c.Merge(ctx, "p", [][]byte{{1}})
+	refused("merge", err, keyvaultfake.ActionCertificatesCreate)
+	_, err = c.CreateCertificate(ctx, "n", policy(t, "example.com", []string{"example.com"}, "P256"))
+	refused("create", err, keyvaultfake.ActionCertificatesCreate)
+	refused("delete", c.DeleteCertificate(ctx, "c"), keyvaultfake.ActionCertificatesDelete)
+	_, err = c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32))
+	refused("sign", err, keyvaultfake.ActionKeysSign)
+	if got := srv.ForbiddenSince(mark); len(got) != 6 {
+		t.Errorf("recorded refusals: %v", got)
+	}
+
+	// Every right is back.
+	srv.SetReader(false)
+	if _, err := c.GetPending(ctx, "p"); err != nil {
+		t.Errorf("get pending with every right: %v", err)
+	}
+	if _, err := c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32)); err != nil {
+		t.Errorf("sign with every right: %v", err)
+	}
+	if err := c.DeletePending(ctx, "p"); err != nil {
+		t.Errorf("delete pending with every right: %v", err)
+	}
+	if _, err := c.CreateCertificate(ctx, "n", policy(t, "example.com", []string{"example.com"}, "P256")); err != nil {
+		t.Errorf("create with every right: %v", err)
+	}
+	if err := c.DeleteCertificate(ctx, "c"); err != nil {
+		t.Errorf("delete with every right: %v", err)
+	}
+}
+
+func TestSetDataActionsGrantsExactlyThose(t *testing.T) {
+	srv, c := start(t)
+	ctx := context.Background()
+	srv.AddPendingOperation("p", "Unknown")
+	srv.SetDataActions(keyvaultfake.ActionCertificatesRead, keyvaultfake.ActionCertificatesCreate)
+	if _, err := c.GetPending(ctx, "p"); err != nil {
+		t.Errorf("get pending: %v", err)
+	}
+	var api *keyvault.APIError
+	if _, err := c.Sign(ctx, "k", "v", "ES256", make([]byte, 32)); !errors.As(err, &api) || api.Status != http.StatusForbidden {
 		t.Errorf("sign: %v", err)
 	}
-	if _, err := c.CreateCertificate(ctx, "n", policy(t, "example.com", []string{"example.com"}, "P256")); !errors.As(err, &api) || api.Status != http.StatusForbidden {
-		t.Errorf("create: %v", err)
-	}
-	if err := c.DeleteCertificate(ctx, "c"); !errors.As(err, &api) || api.Status != http.StatusForbidden {
-		t.Errorf("delete: %v", err)
-	}
-	srv.SetReader(false)
-	if _, err := c.Sign(ctx, key.Name, key.Version, "ES256", make([]byte, 32)); err != nil {
-		t.Errorf("sign after reader mode: %v", err)
+	srv.GrantAll()
+	if _, err := c.Sign(ctx, "k", "v", "ES256", make([]byte, 32)); errors.As(err, &api) && api.Status == http.StatusForbidden {
+		t.Errorf("sign after GrantAll: %v", err)
 	}
 }

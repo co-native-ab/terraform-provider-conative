@@ -84,7 +84,8 @@ func CreatePolicy(commonName string, identifiers []string, keyType string) (Poli
 	}, nil
 }
 
-// VaultState is what the pre-check of an order has read from Key Vault.
+// VaultState is what the check before an order has read from Key Vault. A plan reads only
+// the versions; the pending operation is read when an order runs.
 type VaultState struct {
 	// HasIssuedVersion is true when the certificate has a version with an issued
 	// certificate.
@@ -123,7 +124,7 @@ func PrepareKeyVault(s VaultState, creating bool, importID string) (deletePendin
 		return true, nil
 	}
 	if s.PendingIssuer != UnknownIssuer {
-		return false, fmt.Errorf("the Key Vault certificate has an operation in progress of issuer %q; wait for it to finish or cancel it before ordering", s.PendingIssuer)
+		return false, fmt.Errorf("the Key Vault certificate has an operation in progress of issuer %q; wait for it to finish or cancel it in Key Vault, then apply again", s.PendingIssuer)
 	}
 	return true, nil
 }

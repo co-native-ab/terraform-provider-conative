@@ -278,3 +278,34 @@ func TestRevoke(t *testing.T) {
 		t.Error("a refusal was not reported")
 	}
 }
+
+// The check a plan makes lists versions only: with the rights of a reader, and with every
+// kind of pending operation in the vault, it passes and never asks for one.
+func TestCheckVersionsNeverReadsThePendingOperation(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if _, err := e.kv.ImportCertificate("c", keyvaultfake.ImportOptions{Issuer: "Self", Key: "P256", CommonName: "example.com", DNSNames: []string{"example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.kv.AddPendingOperation("busy", "OtherCA")
+	e.kv.SetReader(true)
+	mark := e.kv.Journal.Mark()
+	for _, name := range []string{"c", "busy", "missing"} {
+		if err := issuer.CheckVersions(ctx, e.vault, name, false, "id"); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Creating over an issued version still names the import ID.
+	if err := issuer.CheckVersions(ctx, e.vault, "c", true, "https://example.vault.azure.net/certificates/c"); err == nil ||
+		!strings.Contains(err.Error(), "import it with the ID") {
+		t.Errorf("create over an existing certificate: %v", err)
+	}
+	for _, r := range e.kv.Journal.Since(mark) {
+		if strings.Contains(r.Path, "/pending") {
+			t.Errorf("a plan check requested %s", r)
+		}
+	}
+	if f := e.kv.Forbidden(); len(f) != 0 {
+		t.Errorf("refused requests: %v", f)
+	}
+}

@@ -64,8 +64,13 @@ until the timeout. It trusts only answers that carry the authoritative-answer fl
 a DNS-intercepting proxy or a secure web gateway that answers DNS queries itself, because such a proxy
 answers for the name servers, often from a cache, and the answer does not carry the flag. The provider
 recognises this: it logs a warning, ignores the answer (a missing record in it proves nothing, and a record
-in it is not proof either) and keeps polling until the timeout, and the error then names the setting. On such
-a network, and wherever port 53 is blocked, turn the check off:
+in it is not proof either) and keeps polling until the timeout, and the error then names the setting. A
+proxy may also refuse the query instead of answering it: an answer of SERVFAIL or REFUSED without the flag
+counts as an answer that is not trusted. When, in the first round of polling, every name server of a zone
+answers SERVFAIL or REFUSED without the flag, the check fails at once, without waiting for the timeout, and
+the error names the setting. (A SERVFAIL that does carry the flag is a failure of the name server itself and
+is retried until the timeout, like a network error.) On such a network, and wherever port 53 is blocked, turn
+the check off:
 
 ```terraform
 provider "conative" {
@@ -245,6 +250,23 @@ Do not use the versioned form (`version`) for consumers that should follow renew
 Renewal needs a plan and apply to happen, for example in a scheduled pipeline run; the provider has no
 background process.
 
+### How consumers pick up a new version
+
+A new version in Key Vault does not reach every consumer at once; the delay is the consumer's, not the
+provider's, and it is set by each service. Two examples:
+
+- Azure Container Apps environments that reference the certificate through its versionless Key Vault ID
+  picked up a new version within minutes in practice. Microsoft documents that it
+  [can take up to 12 hours](https://learn.microsoft.com/azure/container-apps/key-vault-certificates-manage#rotate-certificates).
+- Azure Front Door with the certificate version set to "Latest" rotates on its own schedule, which can take
+  hours or longer. Microsoft documents that a customer certificate
+  [rotates within 3-4 days](https://learn.microsoft.com/azure/frontdoor/end-to-end-tls#certificate-autorotation)
+  of a new version.
+
+Other services differ again, so check how yours follows a Key Vault certificate. Renewing with enough margin,
+that is, a `min_days_remaining` well above the slowest consumer's delay, covers it: the old version stays
+valid while the new one propagates.
+
 ## A plan never writes
 
 Plan and refresh only read, and they need only read rights:
@@ -254,8 +276,10 @@ Plan and refresh only read, and they need only read rights:
   the key still exists. Only a Key Vault answer of "not found" for the key removes the registration from the
   state; any other failure is an error and the state is kept.
 - `conative_acme_certificate` refresh, import and plan read the certificate's public data from Key Vault
-  (the certificate, its versions and a pending operation). They never read a secret, never sign, never call
-  the certificate authority, and never write to Key Vault, DNS or the authority.
+  (the certificate and its versions). They never read a secret, never sign, never call the certificate
+  authority, never touch a pending operation, and never write to Key Vault, DNS or the authority. Key Vault
+  authorises even a read of the pending-operation endpoint (`/certificates/<name>/pending`) as the write
+  action `certificates/create/action`, so the provider uses that endpoint only when an order runs.
 - A plan in which nothing is ordered needs neither the Cloudflare token nor the Resource Manager token.
 
 Importing a registration is an explicit action that looks up the account and therefore signs once. Creating
@@ -295,13 +319,15 @@ An apply that fails part way leaves nothing half-done:
   apply again is the retry.
 - A certificate that has been issued by the authority but whose merge into Key Vault failed is not revoked;
   its key is gone with the cancelled request, and the next apply orders a new one.
-- Before ordering, the provider looks at the pending operation that Key Vault keeps for the certificate.
-  Key Vault keeps the record after an operation has finished, so only an operation that is **in progress**
-  matters: one with the issuer `Unknown` left by an earlier failed run is cancelled, and one in progress for
-  another issuer makes the order fail until it finishes or you cancel it in Key Vault. A completed, failed
-  or cancelled operation of any issuer, for example the record `az keyvault certificate create` leaves for
-  the issuer `Self`, never blocks a plan or an apply (an apply deletes the finished record first). A version
-  that was created that way is just a version added outside Terraform: the next plan renews it in place.
+- At apply, before ordering, the provider looks at the pending operation that Key Vault keeps for the
+  certificate. A plan never reads it, so a plan does not fail because of it. Key Vault keeps the record after
+  an operation has finished, so only an operation that is **in progress** matters: one with the issuer
+  `Unknown` left by an earlier failed run is cancelled, and one in progress for another issuer makes the
+  apply fail, naming the issuer and writing nothing, until it finishes or you cancel it in Key Vault; then
+  apply again. A completed, failed or cancelled operation of any issuer, for example the record
+  `az keyvault certificate create` leaves for the issuer `Self`, never blocks an apply (the apply deletes
+  the finished record first). A version that was created that way is just a version added outside
+  Terraform: the next plan renews it in place.
 - **A failed first order keeps the Key Vault certificate.** The provider creates the certificate in Key
   Vault before the order starts. When the order of a new resource fails, the pending request is cancelled
   but the certificate itself stays, without an issued version, and the error says so. This is deliberate:
@@ -369,12 +395,15 @@ Key Vault data actions (Azure RBAC) for each operation:
 | Operation | Key Vault data actions | Other services |
 | --- | --- | --- |
 | Refresh and plan of a registration | `Microsoft.KeyVault/vaults/keys/read` on the account key | none |
-| Refresh, import and plan of a certificate (nothing is ordered) | `Microsoft.KeyVault/vaults/certificates/read` (get, list versions, read a pending operation) | none |
-| Plan when an order is due | `certificates/read`, as above | Azure DNS: `Microsoft.Network/dnsZones/read` with the Resource Manager token, for each `azure_dns` block that serves a name of the order; Cloudflare: *Zone: Zone: Read* for each `cloudflare` block that serves one. The plan only reads, and fails with a clear error if it cannot read the zone. |
+| Refresh, import and plan of a certificate | `Microsoft.KeyVault/vaults/certificates/read` (get, list versions) | none |
+| Plan when an order is due | `certificates/read` only, as above | Azure DNS: `Microsoft.Network/dnsZones/read` with the Resource Manager token, for each `azure_dns` block that serves a name of the order; Cloudflare: *Zone: Zone: Read* for each `cloudflare` block that serves one. The plan only reads, and fails with a clear error if it cannot read the zone. |
 | Create a registration, change its `email`, import a registration | `keys/read` and `Microsoft.KeyVault/vaults/keys/sign/action` on the account key | the certificate authority |
-| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version and merging the issued chain), `certificates/update/action` (deleting a pending operation, whether it is cancelled or only a finished record; `certificates/delete` is listed with it until it has been verified that the update action is enough on its own), `certificates/delete`, and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
+| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version, reading the pending operation and merging the issued chain), `certificates/update/action` (deleting a pending operation, whether it is cancelled or only a finished record; `certificates/delete` is listed with it until it has been verified that the update action is enough on its own), `certificates/delete`, and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
 | Destroy with `revoke_on_destroy = true` | `certificates/read`, `certificates/delete`, `keys/sign/action` | the certificate authority |
 | Destroy with `revoke_on_destroy = false` | `certificates/delete` | none |
+
+The pending-operation endpoint (`/certificates/<name>/pending`) needs `certificates/create/action` even to
+read it, so the provider uses it only at apply; plan and refresh never call it.
 
 For example, *Key Vault Reader* (metadata only), or *Key Vault Certificates Officer* for the certificate data
 actions and *Key Vault Crypto User* for `keys/read` and `keys/sign/action`. Rights for refresh and plan are a
