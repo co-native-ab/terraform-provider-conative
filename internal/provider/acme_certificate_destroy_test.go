@@ -29,13 +29,13 @@ func serialOf(s *terraform.State) (string, error) {
 
 func TestAccACMECertificate_revokeOnDestroy(t *testing.T) {
 	accPreCheck(t)
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 
 	run := func(t *testing.T, name string, revoke string, arm func(f acmeFixture, serial *string) resource.TestCheckFunc, expectRevoked bool, nonEmpty bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newACMEFixture(t, "P256")
 			var serial string
-			s := spec
+			s := tweaks
 			s.Revoke = revoke
 			resource.Test(t, resource.TestCase{
 				ProtoV6ProviderFactories: newTestProviderFactories(),
@@ -85,7 +85,7 @@ func TestAccACMECertificate_revokeOnDestroy(t *testing.T) {
 			Steps: []resource.TestStep{{
 				PreConfig:          func() { acc.ACME.SetValidity(-24 * time.Hour) },
 				ConfigVariables:    acmeVariables(),
-				Config:             f.config(spec),
+				Config:             f.config(tweaks),
 				ExpectNonEmptyPlan: true,
 			}},
 		})
@@ -96,11 +96,11 @@ func TestAccACMECertificate_revokeOnDestroy(t *testing.T) {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			Steps: []resource.TestStep{
-				{ConfigVariables: acmeVariables(), Config: f.config(spec)},
+				{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
 				{
 					PreConfig:       func() { acc.ACME.RevokeRefused(true) },
 					ConfigVariables: acmeVariables(),
-					Config:          f.config(spec),
+					Config:          f.config(tweaks),
 					Destroy:         true,
 					ExpectError:     regexp.MustCompile(`(?s)revocation\s+is\s+refused`),
 				},
@@ -112,7 +112,7 @@ func TestAccACMECertificate_revokeOnDestroy(t *testing.T) {
 						acc.ACME.RevokeRefused(false)
 					},
 					ConfigVariables: acmeVariables(),
-					Config:          f.config(spec),
+					Config:          f.config(tweaks),
 					PlanOnly:        true,
 				},
 			},
@@ -127,7 +127,7 @@ func TestAccACMECertificate_revokeOnDestroyRequired(t *testing.T) {
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{{
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Revoke: "omit"}),
+			Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Revoke: "omit"}),
 			PlanOnly:        true,
 			ExpectError:     regexp.MustCompile(`(?s)revoke_on_destroy.*is\s+required`),
 		}},
@@ -137,22 +137,22 @@ func TestAccACMECertificate_revokeOnDestroyRequired(t *testing.T) {
 func TestAccACMECertificate_deletedOutsideTerraform(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{
-			{ConfigVariables: acmeVariables(), Config: f.config(spec)},
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
 			{
 				// Refresh drops the resource; creating it again meets Key Vault's soft-deleted name.
 				PreConfig:       func() { acc.KeyVault.SoftDelete(f.Cert) },
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(spec),
+				Config:          f.config(tweaks),
 				ExpectError:     regexp.MustCompile(`(?s)deleted\s+but\s+recoverable`),
 			},
 			{
 				PreConfig:       func() { acc.KeyVault.Purge(f.Cert) },
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(spec),
+				Config:          f.config(tweaks),
 			},
 		},
 	})

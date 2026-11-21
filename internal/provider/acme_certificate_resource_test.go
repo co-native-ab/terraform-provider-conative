@@ -71,7 +71,7 @@ func sortedStrings(in []string) []string {
 func TestAccACMECertificate_mixedProvidersWildcardAndApex(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	cfg := f.config(certSpec{})
+	cfg := f.config(certOptions{})
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
@@ -142,7 +142,7 @@ func TestAccACMECertificate_keyTypes(t *testing.T) {
 				ProtoV6ProviderFactories: newTestProviderFactories(),
 				Steps: []resource.TestStep{{
 					ConfigVariables: acmeVariables(),
-					Config:          f.config(certSpec{KeyType: kt, SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+					Config:          f.config(certOptions{KeyType: kt, SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 					Check: resource.ComposeTestCheckFunc(
 						resource.TestCheckResourceAttr(certAddr, "key_type", kt),
 						func(*terraform.State) error {
@@ -181,26 +181,26 @@ func TestAccACMECertificate_routingErrors(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
 	cases := map[string]struct {
-		spec certSpec
-		want string
+		tweaks certOptions
+		want   string
 	}{
-		"uncovered name": {certSpec{SANs: []string{"*.example.org"}}, `not\s+covered\s+by\s+any\s+match_domains`},
-		"same entry in both kinds": {certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly + `
+		"uncovered name": {certOptions{SANs: []string{"*.example.org"}}, `not\s+covered\s+by\s+any\s+match_domains`},
+		"same entry in both kinds": {certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly + `
   azure_dns {
     subscription_id = "00000000-0000-0000-0000-000000000000"
     resource_group  = "dns"
     zone_name       = "example.com"
     match_domains   = ["example.com"]
   }`}, `appears\s+in\s+(azure_dns\[0\]\s+and\s+cloudflare\[0\]|cloudflare\[0\]\s+and\s+azure_dns\[0\])`},
-		"entry outside its zone": {certSpec{SANs: []string{"*.example.com"}, Blocks: `
+		"entry outside its zone": {certOptions{SANs: []string{"*.example.com"}, Blocks: `
   cloudflare {
     zone          = "example.com"
     match_domains = ["example.net"]
     api_token     = var.cf_token
   }`}, `not\s+equal\s+to\s+or\s+inside\s+the\s+zone`},
-		"no dns block":    {certSpec{SANs: []string{"*.example.com"}, Blocks: " "}, `at\s+least\s+one\s+azure_dns\s+or\s+cloudflare\s+block`},
-		"upper case name": {certSpec{CN: "Example.com", SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}, `must\s+be\s+lower\s+case`},
-		"common name repeated": {certSpec{SANs: []string{"example.com"}, Blocks: cloudflareOnly},
+		"no dns block":    {certOptions{SANs: []string{"*.example.com"}, Blocks: " "}, `at\s+least\s+one\s+azure_dns\s+or\s+cloudflare\s+block`},
+		"upper case name": {certOptions{CN: "Example.com", SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}, `must\s+be\s+lower\s+case`},
+		"common name repeated": {certOptions{SANs: []string{"example.com"}, Blocks: cloudflareOnly},
 			`do\s+not\s+repeat\s+it`},
 	}
 	for name, c := range cases {
@@ -211,7 +211,7 @@ func TestAccACMECertificate_routingErrors(t *testing.T) {
 				Steps: []resource.TestStep{{
 					PreConfig:       markNow(&mark),
 					ConfigVariables: acmeVariables(),
-					Config:          f.config(c.spec),
+					Config:          f.config(c.tweaks),
 					PlanOnly:        true,
 					ExpectError:     regexp.MustCompile(`(?s)` + c.want),
 				}},
@@ -241,7 +241,7 @@ func TestAccACMECertificate_nestedSuffixRouting(t *testing.T) {
 		Steps: []resource.TestStep{{
 			PreConfig:       markNow(&mark),
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{CN: "www.example.com", SANs: []string{"x.apps.example.com"}, Blocks: blocks}),
+			Config:          f.config(certOptions{CN: "www.example.com", SANs: []string{"x.apps.example.com"}, Blocks: blocks}),
 			Check: func(*terraform.State) error {
 				var azure, cf []string
 				for _, e := range acc.AzureDNS.Journal.WritesSince(mark.AzureDNSPosition()) {
@@ -279,7 +279,7 @@ func TestAccACMECertificate_existingCertificateRequiresImport(t *testing.T) {
 				mark = acc.Mark()
 			},
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+			Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 			PlanOnly:        true,
 			ExpectError: regexp.MustCompile(`(?s)import\s+it\s+with\s+the\s+ID\s+` +
 				regexp.QuoteMeta(acc.KeyVault.URL+"/certificates/"+f.Cert)),
@@ -314,20 +314,20 @@ func TestAccACMECertificate_preflightZoneChecks(t *testing.T) {
 			{
 				PreConfig:       markNow(&mark),
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(certSpec{CN: "x.missing.example.net", SANs: []string{}, Blocks: unknownAzure}),
+				Config:          f.config(certOptions{CN: "x.missing.example.net", SANs: []string{}, Blocks: unknownAzure}),
 				PlanOnly:        true,
 				ExpectError:     regexp.MustCompile(`(?s)ResourceNotFound`),
 			},
 			{
 				PreConfig:       requireNoWrites(t, &mark),
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(certSpec{CN: "example.org", SANs: []string{}, Blocks: foreignCloudflare}),
+				Config:          f.config(certOptions{CN: "example.org", SANs: []string{}, Blocks: foreignCloudflare}),
 				PlanOnly:        true,
 				ExpectError:     regexp.MustCompile(`(?s)not\s+found\s+or\s+cannot\s+be\s+read`),
 			},
 			{
 				ConfigVariables: acmeVariables(),
-				Config:          noRM + f.registrationHCL("") + f.certHCL(certSpec{}),
+				Config:          noRM + f.registrationHCL("") + f.certHCL(certOptions{}),
 				PlanOnly:        true,
 				ExpectError:     regexp.MustCompile(`(?s)resource_manager_access_token`),
 			},
@@ -348,7 +348,7 @@ func TestAccACMECertificate_existingTXTKept(t *testing.T) {
 				cfRecord = acc.Cloudflare.Seed("example.com", "_acme-challenge.example.com", "foreign-cloudflare-value")
 			},
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{}),
+			Config:          f.config(certOptions{}),
 			Check: func(*terraform.State) error {
 				if got := acc.AzureDNS.Values(testSubscription, testResourceGrp, "example.net", "_acme-challenge.apps"); !slices.Equal(got, []string{"foreign-azure-value"}) {
 					return fmt.Errorf("Azure DNS values %v", got)
@@ -382,8 +382,8 @@ func TestAccACMECertificate_renewalWindow(t *testing.T) {
 	f := newACMEFixture(t, "P256")
 	var id string
 	var mark acctest.Mark
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 5}
-	renew := spec
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 5}
+	renew := tweaks
 	renew.MinDays = 15
 
 	resource.Test(t, resource.TestCase{
@@ -392,7 +392,7 @@ func TestAccACMECertificate_renewalWindow(t *testing.T) {
 			{
 				PreConfig:       func() { acc.ACME.SetValidity(10 * 24 * time.Hour) },
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(spec),
+				Config:          f.config(tweaks),
 				Check: func(s *terraform.State) error {
 					a, err := certAttrs(s)
 					id = a["id"]
@@ -402,7 +402,7 @@ func TestAccACMECertificate_renewalWindow(t *testing.T) {
 			{
 				PreConfig:       markNow(&mark),
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(spec),
+				Config:          f.config(tweaks),
 				PlanOnly:        true,
 			},
 			{
@@ -444,12 +444,12 @@ func TestAccACMECertificate_renewalWindow(t *testing.T) {
 func TestAccACMECertificate_externalVersion(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	var external string
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{
-			{ConfigVariables: acmeVariables(), Config: f.config(spec)},
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
 			{
 				PreConfig: func() {
 					v, err := acc.KeyVault.AddExternalVersion(f.Cert)
@@ -459,7 +459,7 @@ func TestAccACMECertificate_externalVersion(t *testing.T) {
 					external = v
 				},
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(spec),
+				Config:          f.config(tweaks),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate),
 				}},
@@ -484,7 +484,7 @@ func TestAccACMECertificate_externalVersion(t *testing.T) {
 func TestAccACMECertificate_namesChange(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	base := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	base := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	more := base
 	more.SANs = []string{"*.example.com", "www.example.com"}
 	ec := more
@@ -539,7 +539,7 @@ resource "conative_acme_registration" "r2" {
   account_key_id = %q
 }
 `, acc.ACME.DirectoryURL(), second)
-	base := certSpec{SANs: []string{"*.example.com", "*.apps.example.net"}}
+	base := certOptions{SANs: []string{"*.example.com", "*.apps.example.net"}}
 	swapped := base
 	swapped.Registrat = "conative_acme_registration.r2.id"
 	swapped.Revoke = "false"
@@ -583,7 +583,7 @@ resource "conative_acme_registration" "r2" {
 func TestAccACMECertificate_planWritesNothing(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	base := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 5}
+	base := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 5}
 	due := base
 	due.MinDays = 15
 	var mark acctest.Mark
@@ -630,13 +630,13 @@ func TestAccACMECertificate_lifetimeWarning(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
 	logFile := acctest.EnableTraceLogs(t, t.TempDir())
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 20}
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 20}
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{{
 			PreConfig:          func() { acc.ACME.SetValidity(10 * 24 * time.Hour) },
 			ConfigVariables:    acmeVariables(),
-			Config:             f.config(spec),
+			Config:             f.config(tweaks),
 			ExpectNonEmptyPlan: true,
 		}},
 	})

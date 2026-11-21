@@ -153,8 +153,8 @@ const mixedBlocks = `
   }
 `
 
-// certSpec describes a conative_acme_certificate for the tests.
-type certSpec struct {
+// certOptions describes a conative_acme_certificate for the tests.
+type certOptions struct {
 	CN        string
 	SANs      []string
 	KeyType   string
@@ -166,7 +166,7 @@ type certSpec struct {
 	Registrat string // registration_id expression, default the fixture's registration
 }
 
-func (f acmeFixture) certHCL(s certSpec) string {
+func (f acmeFixture) certHCL(s certOptions) string {
 	if s.CN == "" {
 		s.CN = "example.com"
 	}
@@ -219,7 +219,7 @@ resource "conative_acme_certificate" %q {
 }
 
 // config is the whole configuration of a certificate test step.
-func (f acmeFixture) config(s certSpec) string {
+func (f acmeFixture) config(s certOptions) string {
 	return acmeProviderConfig() + f.registrationHCL(`email = "certificates@example.com"`) + f.certHCL(s)
 }
 

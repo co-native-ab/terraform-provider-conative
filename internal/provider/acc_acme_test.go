@@ -75,8 +75,8 @@ func TestAccProvider_acmeSecretsNotInStateOrPlan(t *testing.T) {
 	t.Setenv("TF_ACC_TEMP_DIR", dir)
 	f := newACMEFixture(t, "P256")
 	var files, plans int
-	cfg := f.config(certSpec{})
-	renew := f.config(certSpec{MinDays: 100})
+	cfg := f.config(certOptions{})
+	renew := f.config(certOptions{MinDays: 100})
 	planChecks := resource.ConfigPlanChecks{
 		PreApply:             []plancheck.PlanCheck{planNeverHoldsACMESecrets{t, &plans}},
 		PostApplyPostRefresh: []plancheck.PlanCheck{planNeverHoldsACMESecrets{t, &plans}},
@@ -104,8 +104,8 @@ func TestAccProvider_acmeSecretsNotInLogs(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
 	logPath := acctest.EnableTraceLogs(t, t.TempDir())
-	cfg := f.config(certSpec{})
-	renew := f.config(certSpec{MinDays: 100})
+	cfg := f.config(certOptions{})
+	renew := f.config(certOptions{MinDays: 100})
 	refused := acmeVariables()
 	refused["kv_token"] = acmeVariables()["arm_token"]
 
@@ -183,12 +183,12 @@ func TestAccProvider_acmeTokensReachOnlyTheirService(t *testing.T) {
 				ExpectError: regexp.MustCompile(`(?s)Key\s+Vault\s+answered\s+401`),
 			},
 			{
-				ConfigVariables: acmeVariables(), Config: f.config(certSpec{}),
+				ConfigVariables: acmeVariables(), Config: f.config(certOptions{}),
 				PlanOnly: true, ExpectNonEmptyPlan: true,
 			},
 			{
 				// The Resource Manager token is refused by Azure DNS, which names itself.
-				ConfigVariables: armOnly, Config: f.config(certSpec{}),
+				ConfigVariables: armOnly, Config: f.config(certOptions{}),
 				PlanOnly:    true,
 				ExpectError: regexp.MustCompile(`(?s)Azure\s+DNS\s+answered\s+401`),
 			},

@@ -33,17 +33,17 @@ var ignoreUnreadable = []string{"registration_id", "revoke_on_destroy", "azure_d
 func TestAccACMECertificate_import(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
-	slash := spec
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	slash := tweaks
 	slash.VaultURL = acc.KeyVault.URL + "/"
 	var mark acctest.Mark
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{
-			{ConfigVariables: acmeVariables(), Config: f.config(spec)},
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
 			{
 				ConfigVariables:         acmeVariables(),
-				Config:                  f.config(spec),
+				Config:                  f.config(tweaks),
 				ResourceName:            certAddr,
 				ImportState:             true,
 				ImportStateId:           importID(f.Cert),
@@ -85,7 +85,7 @@ func TestAccACMECertificate_importExisting(t *testing.T) {
 	f := newACMEFixture(t, "P256")
 	var imported, id, secretID string
 	var mark acctest.Mark
-	matching := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, VaultURL: acc.KeyVault.URL + "/"}
+	matching := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, VaultURL: acc.KeyVault.URL + "/"}
 	due := matching
 	due.MinDays = 100
 	onlyKnown := func(attr string) plancheck.PlanCheck {
@@ -261,7 +261,7 @@ func TestAccACMECertificate_importRefused(t *testing.T) {
 					{
 						PreConfig:          func() { c.prepare(f.Cert); mark = acc.Mark() },
 						ConfigVariables:    acmeVariables(),
-						Config:             f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+						Config:             f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 						ResourceName:       certAddr,
 						ImportState:        true,
 						ImportStatePersist: true,
@@ -288,11 +288,11 @@ func TestAccACMECertificate_importRefused(t *testing.T) {
 
 func TestAccACMECertificate_importThenOrder(t *testing.T) {
 	accPreCheck(t)
-	importStep := func(t *testing.T, f acmeFixture, spec certSpec, o keyvaultfake.ImportOptions, version *string) resource.TestStep {
+	importStep := func(t *testing.T, f acmeFixture, tweaks certOptions, o keyvaultfake.ImportOptions, version *string) resource.TestStep {
 		return resource.TestStep{
 			PreConfig:          existingCert(t, f, o, version),
 			ConfigVariables:    acmeVariables(),
-			Config:             f.config(spec),
+			Config:             f.config(tweaks),
 			ResourceName:       certAddr,
 			ImportState:        true,
 			ImportStatePersist: true,
@@ -313,14 +313,14 @@ func TestAccACMECertificate_importThenOrder(t *testing.T) {
 	t.Run("another key type orders", func(t *testing.T) {
 		f := newACMEFixture(t, "P256")
 		var v string
-		spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, KeyType: "RSA4096"}
+		tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, KeyType: "RSA4096"}
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			Steps: []resource.TestStep{
 				{ConfigVariables: acmeVariables(), Config: registrationOnly(f)},
-				importStep(t, f, spec, opts(), &v),
+				importStep(t, f, tweaks, opts(), &v),
 				{
-					ConfigVariables: acmeVariables(), Config: f.config(spec), ConfigPlanChecks: orders,
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks), ConfigPlanChecks: orders,
 					Check: func(*terraform.State) error {
 						if p := acc.KeyVault.Policy(f.Cert); p.KeySize != 4096 || vaultVersions(f.Cert) != 2 {
 							return fmt.Errorf("policy %+v, versions %d", p, vaultVersions(f.Cert))
@@ -344,14 +344,14 @@ func TestAccACMECertificate_importThenOrder(t *testing.T) {
 		var v string
 		o := opts()
 		o.Validity = 10 * 24 * time.Hour
-		spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+		tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			Steps: []resource.TestStep{
 				{ConfigVariables: acmeVariables(), Config: registrationOnly(f)},
-				importStep(t, f, spec, o, &v),
+				importStep(t, f, tweaks, o, &v),
 				{
-					ConfigVariables: acmeVariables(), Config: f.config(spec), ConfigPlanChecks: orders,
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks), ConfigPlanChecks: orders,
 					Check: func(*terraform.State) error {
 						if vaultVersions(f.Cert) != 2 {
 							return fmt.Errorf("%d issued versions, want 2", vaultVersions(f.Cert))
@@ -366,16 +366,16 @@ func TestAccACMECertificate_importThenOrder(t *testing.T) {
 	t.Run("a pending operation of another issuer fails the order", func(t *testing.T) {
 		f := newACMEFixture(t, "P256")
 		var v string
-		spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, KeyType: "P256"}
+		tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, KeyType: "P256"}
 		var mark acctest.Mark
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			Steps: []resource.TestStep{
 				{ConfigVariables: acmeVariables(), Config: registrationOnly(f)},
-				importStep(t, f, spec, opts(), &v),
+				importStep(t, f, tweaks, opts(), &v),
 				{
 					PreConfig:       func() { acc.KeyVault.AddPendingOperation(f.Cert, "OtherCA"); mark = acc.Mark() },
-					ConfigVariables: acmeVariables(), Config: f.config(spec),
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks),
 					ExpectError: regexp.MustCompile(`OtherCA`),
 				},
 				{
@@ -398,7 +398,7 @@ func TestAccACMECertificate_destroyAfterImport(t *testing.T) {
 	t.Run("an imported certificate is not revoked", func(t *testing.T) {
 		f := newACMEFixture(t, "P256")
 		before := slices.Clone(acc.ACME.Revoked())
-		matching := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+		matching := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			CheckDestroy: func(*terraform.State) error {
@@ -427,7 +427,7 @@ func TestAccACMECertificate_destroyAfterImport(t *testing.T) {
 		f := newACMEFixture(t, "P256")
 		var serial string
 		var v string
-		renew := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 100}
+		renew := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 100}
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: newTestProviderFactories(),
 			CheckDestroy: func(*terraform.State) error {

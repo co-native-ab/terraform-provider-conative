@@ -27,8 +27,8 @@ func assertCleanup(t *testing.T, cert string) func() {
 func TestAccACMECertificate_failedValidationCleansUpAndRetries(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{}
-	renew := certSpec{MinDays: 100}
+	tweaks := certOptions{}
+	renew := certOptions{MinDays: 100}
 	cleanup := assertCleanup(t, f.Cert)
 	failed := regexp.MustCompile(`(?s)validation\s+of\s+\*\.apps\.example\.net\s+failed`)
 
@@ -37,7 +37,7 @@ func TestAccACMECertificate_failedValidationCleansUpAndRetries(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				PreConfig:       func() { acc.ACME.FailValidation("*.apps.example.net") },
-				ConfigVariables: acmeVariables(), Config: f.config(spec), ExpectError: failed,
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks), ExpectError: failed,
 			},
 			{
 				PreConfig: func() {
@@ -47,7 +47,7 @@ func TestAccACMECertificate_failedValidationCleansUpAndRetries(t *testing.T) {
 					}
 					acc.ACME.ClearFailures()
 				},
-				ConfigVariables: acmeVariables(), Config: f.config(spec),
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks),
 				Check: dnsClean(),
 			},
 			{
@@ -82,8 +82,8 @@ func TestAccACMECertificate_failedValidationCleansUpAndRetries(t *testing.T) {
 func TestAccACMECertificate_pendingOperationLeftBehind(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
-	renew := spec
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	renew := tweaks
 	renew.MinDays = 100
 	other := regexp.MustCompile(`OtherCA`)
 
@@ -93,7 +93,7 @@ func TestAccACMECertificate_pendingOperationLeftBehind(t *testing.T) {
 			{
 				// Create: a leftover operation of issuer Unknown is deleted.
 				PreConfig:       func() { acc.KeyVault.AddPendingOperation(f.Cert, "Unknown") },
-				ConfigVariables: acmeVariables(), Config: f.config(spec),
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks),
 				Check: func(*terraform.State) error {
 					if slices.Contains(acc.KeyVault.PendingOperations(), f.Cert) {
 						return fmt.Errorf("the leftover pending operation was not deleted")
@@ -120,7 +120,7 @@ func TestAccACMECertificate_pendingOperationLeftBehind(t *testing.T) {
 				PreConfig: func() {
 					acc.KeyVault.AddPendingOperation(f.Cert, "OtherCA")
 				},
-				ConfigVariables: acmeVariables(), Config: f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 400}),
+				ConfigVariables: acmeVariables(), Config: f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, MinDays: 400}),
 				ExpectError: other,
 			},
 		},
@@ -135,7 +135,7 @@ func TestAccACMECertificate_pendingOperationOfAnotherIssuerOnCreate(t *testing.T
 		Steps: []resource.TestStep{{
 			PreConfig:       func() { acc.KeyVault.AddPendingOperation(f.Cert, "OtherCA") },
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+			Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 			ExpectError:     regexp.MustCompile(`OtherCA`),
 		}},
 	})
@@ -153,7 +153,7 @@ func TestAccACMECertificate_wrongKeyChainRefused(t *testing.T) {
 		Steps: []resource.TestStep{{
 			PreConfig:       func() { acc.ACME.IssueWrongKey(true) },
 			ConfigVariables: acmeVariables(),
-			Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+			Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 			ExpectError:     regexp.MustCompile(`(?s)not\s+the\s+key\s+of\s+the\s+signing\s+request`),
 		}},
 	})
@@ -185,7 +185,7 @@ func TestAccACMECertificate_dnsWriteFails(t *testing.T) {
 				Steps: []resource.TestStep{{
 					PreConfig:       c.arm,
 					ConfigVariables: acmeVariables(),
-					Config:          f.config(certSpec{}),
+					Config:          f.config(certOptions{}),
 					ExpectError:     regexp.MustCompile(`(?s)` + c.want),
 				}},
 			})
@@ -209,24 +209,24 @@ func TestAccACMECertificate_dnsWriteFails(t *testing.T) {
 func TestAccACMECertificate_refreshFailureKeepsState(t *testing.T) {
 	accPreCheck(t)
 	f := newACMEFixture(t, "P256")
-	spec := certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	wrongToken := acmeVariables()
 	wrongToken["kv_token"] = acmeVariables()["arm_token"] // the Resource Manager token is not accepted by Key Vault
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: newTestProviderFactories(),
 		Steps: []resource.TestStep{
-			{ConfigVariables: acmeVariables(), Config: f.config(spec)},
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
 			{
 				PreConfig:       func() { acc.KeyVault.SetFailure(503) },
-				ConfigVariables: acmeVariables(), Config: f.config(spec), PlanOnly: true,
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks), PlanOnly: true,
 				ExpectError: regexp.MustCompile(`Key\s+Vault\s+answered\s+503`),
 			},
 			{
 				PreConfig:       func() { acc.KeyVault.SetFailure(0) },
-				ConfigVariables: wrongToken, Config: f.config(spec), PlanOnly: true,
+				ConfigVariables: wrongToken, Config: f.config(tweaks), PlanOnly: true,
 				ExpectError: regexp.MustCompile(`Key\s+Vault\s+answered\s+401`),
 			},
-			{ConfigVariables: acmeVariables(), Config: f.config(spec), PlanOnly: true},
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks), PlanOnly: true},
 		},
 	})
 }
@@ -240,7 +240,7 @@ func TestAccACMECertificate_boundedRetries(t *testing.T) {
 			Steps: []resource.TestStep{{
 				PreConfig:       func() { acc.ACME.Fail5xx(2) },
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+				Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 			}},
 		})
 	})
@@ -252,7 +252,7 @@ func TestAccACMECertificate_boundedRetries(t *testing.T) {
 			Steps: []resource.TestStep{{
 				PreConfig:       func() { acc.ACME.Fail5xx(10) },
 				ConfigVariables: acmeVariables(),
-				Config:          f.config(certSpec{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
+				Config:          f.config(certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}),
 				ExpectError:     regexp.MustCompile(`(?s)cannot\s+look\s+up\s+the\s+account.*503`),
 			}},
 		})
