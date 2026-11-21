@@ -438,7 +438,7 @@ func (r *acmeCertificateResource) buildOrder(ctx context.Context, access *acmeAc
 	return issuer.Order{
 		Registration: reg, Vault: kv, Certificate: name, CommonName: m.CommonName.ValueString(), Identifiers: ids,
 		KeyType: m.KeyType.ValueString(), Creating: creating, ImportID: acme.CertificateID(vault, name),
-		Routes: routes, Publishers: publishers, Checker: access.env.propagation, WaitTimeout: access.env.waitTimeout,
+		Routes: routes, Publishers: publishers, Checker: access.propagation(), WaitTimeout: access.env.waitTimeout,
 	}, nil
 }
 

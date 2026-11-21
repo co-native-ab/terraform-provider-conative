@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/keyvaultfake"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acme/dnscheck"
 )
 
 const (
@@ -32,19 +34,54 @@ func newTestProviderFactories() map[string]func() (tfprotov6.ProviderServer, err
 			p := &conativeProvider{version: "test", acmeEnv: acmeEnv{
 				resourceManagerURL: acc.AzureDNS.URL,
 				cloudflareURL:      acc.Cloudflare.APIURL(),
-				propagation:        acc.DNS.Checker(),
-				retryBase:          5 * time.Millisecond,
-				waitTimeout:        30 * time.Second,
-				httpClient:         acc.HTTPClient(),
+				propagationFor: func(check bool, timeout time.Duration) dnscheck.Checker {
+					recordPropagation(check, timeout)
+					if !check {
+						return dnscheck.DelayOnly{}
+					}
+					return acc.DNS.Checker()
+				},
+				retryBase:   5 * time.Millisecond,
+				waitTimeout: 30 * time.Second,
+				httpClient:  acc.HTTPClient(),
 			}}
 			return providerserver.NewProtocol6WithError(p)()
 		},
 	}
 }
 
+var (
+	propagationMu       sync.Mutex
+	propagationSettings []propagationSetting
+)
+
+type propagationSetting struct {
+	check   bool
+	timeout time.Duration
+}
+
+func recordPropagation(check bool, timeout time.Duration) {
+	propagationMu.Lock()
+	defer propagationMu.Unlock()
+	propagationSettings = append(propagationSettings, propagationSetting{check, timeout})
+}
+
+// lastPropagation returns the settings of the most recent propagation check built.
+func lastPropagation() (propagationSetting, bool) {
+	propagationMu.Lock()
+	defer propagationMu.Unlock()
+	if len(propagationSettings) == 0 {
+		return propagationSetting{}, false
+	}
+	return propagationSettings[len(propagationSettings)-1], true
+}
+
 // acmeProviderConfig is the provider block of the ACME acceptance configurations. The
 // tokens come from ephemeral, sensitive variables, as they would in practice.
-func acmeProviderConfig() string {
+func acmeProviderConfig() string { return acmeProviderConfigWith("") }
+
+// acmeProviderConfigWith adds settings (lines inside the acme object) to the provider block.
+func acmeProviderConfigWith(settings string) string {
 	return `
 variable "kv_token" {
   type      = string
@@ -68,6 +105,7 @@ provider "conative" {
   acme = {
     key_vault_access_token        = var.kv_token
     resource_manager_access_token = var.arm_token
+    ` + settings + `
   }
 }
 `

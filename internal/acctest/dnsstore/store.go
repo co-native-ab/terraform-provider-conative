@@ -92,20 +92,22 @@ func (s *Store) Checker() dnscheck.Checker { return checker{s} }
 
 type checker struct{ s *Store }
 
-func (c checker) Wait(ctx context.Context, fqdn, _ string, values []string) error {
+func (c checker) Wait(ctx context.Context, records []dnscheck.Record) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	c.s.mu.Lock()
-	never := c.s.never[norm(fqdn)]
-	c.s.mu.Unlock()
-	if never {
-		return fmt.Errorf("the TXT value %q of %s is not visible on the name server (test store)", values[0], fqdn)
-	}
-	have := c.s.Values(fqdn)
-	for _, v := range values {
-		if !slices.Contains(have, v) {
-			return fmt.Errorf("the TXT value %q of %s is not visible on the name server (test store)", v, fqdn)
+	for _, r := range records {
+		c.s.mu.Lock()
+		never := c.s.never[norm(r.FQDN)]
+		c.s.mu.Unlock()
+		if never {
+			return fmt.Errorf("the TXT value %q of %s is not visible on the name server (test store)", r.Values[0], r.FQDN)
+		}
+		have := c.s.Values(r.FQDN)
+		for _, v := range r.Values {
+			if !slices.Contains(have, v) {
+				return fmt.Errorf("the TXT value %q of %s is not visible on the name server (test store)", v, r.FQDN)
+			}
 		}
 	}
 	return nil

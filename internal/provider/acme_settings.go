@@ -9,9 +9,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
+	"github.com/co-native-ab/terraform-provider-conative/internal/acme"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acme/dnscheck"
 )
 
@@ -27,8 +29,10 @@ const (
 type acmeEnv struct {
 	resourceManagerURL string
 	cloudflareURL      string
-	propagation        dnscheck.Checker
-	httpClient         *http.Client
+	// propagationFor builds the propagation check from the settings; nil means the
+	// production check (dnscheck.Authoritative, or dnscheck.DelayOnly when it is off).
+	propagationFor func(check bool, timeout time.Duration) dnscheck.Checker
+	httpClient     *http.Client
 	// retryBase and waitTimeout shorten the pauses and waits of an order in tests; zero
 	// means the production values.
 	retryBase   time.Duration
@@ -39,7 +43,6 @@ func productionACMEEnv() acmeEnv {
 	return acmeEnv{
 		resourceManagerURL: resourceManagerBaseURL,
 		cloudflareURL:      cloudflareBaseURL,
-		propagation:        dnscheck.Default(),
 	}
 }
 
@@ -56,13 +59,33 @@ type acmeAccess struct {
 	// apply.
 	resourceManagerUnknown bool
 
+	// propagationCheck says whether the provider waits until the challenge records are
+	// visible on the zone's name servers; propagationTimeout bounds that wait.
+	propagationCheck   bool
+	propagationTimeout time.Duration
+
 	http *http.Client
 	env  acmeEnv
+}
+
+// propagation returns the check an order runs after it has written its records.
+func (a *acmeAccess) propagation() dnscheck.Checker {
+	if a.env.propagationFor != nil {
+		return a.env.propagationFor(a.propagationCheck, a.propagationTimeout)
+	}
+	if !a.propagationCheck {
+		return dnscheck.DelayOnly{Delay: dnscheck.DefaultInitialDelay}
+	}
+	c := dnscheck.Default()
+	c.Timeout = a.propagationTimeout
+	return c
 }
 
 type acmeModel struct {
 	KeyVaultAccessToken        types.String `tfsdk:"key_vault_access_token"`
 	ResourceManagerAccessToken types.String `tfsdk:"resource_manager_access_token"`
+	DNSPropagationCheck        types.Bool   `tfsdk:"dns_propagation_check"`
+	DNSPropagationTimeout      types.String `tfsdk:"dns_propagation_timeout"`
 }
 
 func acmeSettingsSchema() schema.Attribute {
@@ -87,8 +110,30 @@ func acmeSettingsSchema() schema.Attribute {
 				Optional:  true,
 				Sensitive: true,
 			},
+			"dns_propagation_check": schema.BoolAttribute{
+				Description: "Whether to wait until the challenge records are visible on the zone's authoritative " +
+					"name servers before the certificate authority is asked to validate them. Default `true`. " +
+					"The check waits five seconds, then queries every name server of the zone directly (UDP, with " +
+					"a fall back to TCP, port 53) every five seconds and trusts only answers that carry the " +
+					"authoritative-answer flag. It needs direct access to port 53 of those name servers and does not " +
+					"work behind a DNS-intercepting proxy or secure web gateway, which answers on their behalf; " +
+					"set this to `false` there. When it is `false` the provider still waits five seconds after " +
+					"writing the records and then lets the certificate authority validate them.",
+				Optional: true,
+			},
+			"dns_propagation_timeout": schema.StringAttribute{
+				Description: "How long the propagation check keeps polling, as a Go duration such as `90s` or `5m`, " +
+					"between `10s` and `30m`. Default `2m`. Ignored when `dns_propagation_check` is `false`.",
+				Optional:   true,
+				Validators: []validator.String{checkString("must be a duration between 10s and 30m", validatePropagationTimeout)},
+			},
 		},
 	}
+}
+
+func validatePropagationTimeout(s string) error {
+	_, err := acme.ParsePropagationTimeout(s)
+	return err
 }
 
 // defaultHTTPClient is shared by every ACME request: TLS 1.2 or later, a 30 second limit
@@ -107,7 +152,10 @@ func defaultHTTPClient() *http.Client {
 
 // configureACME turns the acme settings into access, or records why they are unusable.
 func (p *conativeProvider) configureACME(ctx context.Context, obj types.Object, resp *provider.ConfigureResponse) *acmeAccess {
-	access := &acmeAccess{env: p.acmeEnv, http: p.acmeEnv.httpClient}
+	access := &acmeAccess{
+		env: p.acmeEnv, http: p.acmeEnv.httpClient,
+		propagationCheck: true, propagationTimeout: acme.DefaultPropagationTimeout,
+	}
 	if access.http == nil {
 		access.http = defaultHTTPClient()
 	}
@@ -131,6 +179,13 @@ func (p *conativeProvider) configureACME(ctx context.Context, obj types.Object, 
 		access.reason = "acme.key_vault_access_token is not set"
 	default:
 		access.keyVaultToken = s.KeyVaultAccessToken.ValueString()
+	}
+	access.propagationCheck = s.DNSPropagationCheck.IsNull() || s.DNSPropagationCheck.IsUnknown() || s.DNSPropagationCheck.ValueBool()
+	access.propagationTimeout = acme.DefaultPropagationTimeout
+	if !s.DNSPropagationTimeout.IsNull() && !s.DNSPropagationTimeout.IsUnknown() {
+		if d, err := acme.ParsePropagationTimeout(s.DNSPropagationTimeout.ValueString()); err == nil {
+			access.propagationTimeout = d
+		}
 	}
 	switch {
 	case s.ResourceManagerAccessToken.IsUnknown():

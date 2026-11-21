@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/dnsstore"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acme/dnscheck"
 )
 
 func TestStoreValuesAndChecker(t *testing.T) {
@@ -17,14 +18,14 @@ func TestStoreValuesAndChecker(t *testing.T) {
 		t.Fatalf("names are case-insensitive and ignore a trailing dot: %v", got)
 	}
 	ctx := context.Background()
-	if err := s.Checker().Wait(ctx, "_acme-challenge.example.com", "example.com", []string{"a", "b"}); err != nil {
+	if err := s.Checker().Wait(ctx, []dnscheck.Record{{FQDN: "_acme-challenge.example.com", Zone: "example.com", Values: []string{"a", "b"}}}); err != nil {
 		t.Error(err)
 	}
-	if err := s.Checker().Wait(ctx, "_acme-challenge.example.com", "example.com", []string{"c"}); err == nil || !strings.Contains(err.Error(), `"c"`) {
+	if err := s.Checker().Wait(ctx, []dnscheck.Record{{FQDN: "_acme-challenge.example.com", Zone: "example.com", Values: []string{"c"}}}); err == nil || !strings.Contains(err.Error(), `"c"`) {
 		t.Errorf("a missing value: %v", err)
 	}
 	s.NeverPropagate("_acme-challenge.example.com")
-	if err := s.Checker().Wait(ctx, "_acme-challenge.example.com", "example.com", []string{"a"}); err == nil {
+	if err := s.Checker().Wait(ctx, []dnscheck.Record{{FQDN: "_acme-challenge.example.com", Zone: "example.com", Values: []string{"a"}}}); err == nil {
 		t.Error("NeverPropagate has no effect")
 	}
 	s.Remove("_acme-challenge.example.com", "a")

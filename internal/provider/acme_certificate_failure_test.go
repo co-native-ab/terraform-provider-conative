@@ -262,3 +262,63 @@ func TestAccACMECertificate_boundedRetries(t *testing.T) {
 		}
 	})
 }
+
+func TestAccACMECertificate_propagationSettings(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	with := func(settings string) string {
+		return acmeProviderConfigWith(settings) + f.registrationHCL("") + f.certHCL(tweaks)
+	}
+	never := func() { acc.DNS.NeverPropagate("_acme-challenge.example.com") }
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				// On by default: a record that never becomes visible fails the order.
+				PreConfig:       never,
+				ConfigVariables: acmeVariables(), Config: with(""),
+				ExpectError: regexp.MustCompile(`(?s)did\s+not\s+become\s+visible`),
+			},
+			{
+				PreConfig: func() {
+					if s, ok := lastPropagation(); !ok || !s.check || s.timeout != 2*time.Minute {
+						t.Errorf("default settings: %+v", s)
+					}
+				},
+				ConfigVariables: acmeVariables(), Config: with(`dns_propagation_timeout = "90s"`),
+				ExpectError: regexp.MustCompile(`(?s)did\s+not\s+become\s+visible`),
+			},
+			{
+				PreConfig: func() {
+					if s, ok := lastPropagation(); !ok || !s.check || s.timeout != 90*time.Second {
+						t.Errorf("timeout setting: %+v", s)
+					}
+				},
+				// Off: the provider does not wait for visibility and the authority validates.
+				ConfigVariables: acmeVariables(), Config: with(`dns_propagation_check = false`),
+				Check: func(*terraform.State) error {
+					if s, ok := lastPropagation(); !ok || s.check {
+						return fmt.Errorf("the check was not turned off: %+v", s)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+func TestAccACMEProvider_propagationTimeoutOutOfRange(t *testing.T) {
+	accPreCheck(t)
+	for _, bad := range []string{"5s", "31m", "soon"} {
+		resource.Test(t, resource.TestCase{
+			ProtoV6ProviderFactories: newTestProviderFactories(),
+			Steps: []resource.TestStep{{
+				ConfigVariables: acmeVariables(),
+				Config:          acmeProviderConfigWith(`dns_propagation_timeout = "`+bad+`"`) + `data "conative_azuresql_database_users" "x" {}`,
+				PlanOnly:        true,
+				ExpectError:     regexp.MustCompile(`(?s)Invalid\s+value.*must\s+be\s+(between\s+10s\s+and\s+30m|a\s+duration)`),
+			}},
+		})
+	}
+}

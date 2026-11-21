@@ -197,10 +197,12 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 			return Result{}, fmt.Errorf("cannot publish the challenge record %s through the %s block (zone %s): %w", fqdn, ownerBlock[fqdn], pub.Zone(), perr)
 		}
 	}
-	for _, fqdn := range fqdns {
-		if cerr := o.Checker.Wait(ctx, fqdn, owner[fqdn].Zone(), records[fqdn]); cerr != nil {
-			return Result{}, fmt.Errorf("the challenge record %s did not become visible: %w", fqdn, cerr)
-		}
+	checks := make([]dnscheck.Record, len(fqdns))
+	for i, fqdn := range fqdns {
+		checks[i] = dnscheck.Record{FQDN: fqdn, Zone: owner[fqdn].Zone(), Values: records[fqdn]}
+	}
+	if cerr := o.Checker.Wait(ctx, checks); cerr != nil {
+		return Result{}, fmt.Errorf("the challenge records did not become visible: %w", cerr)
 	}
 
 	for _, c := range challenges {
