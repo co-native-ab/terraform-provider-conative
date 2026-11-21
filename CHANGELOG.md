@@ -5,7 +5,31 @@ All notable changes to this project are documented in this file. The format is b
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0.0, an incompatible change
 bumps the minor version.
 
-## Unreleased
+## 0.2.1 (2026-11-21)
+
+### Fixed
+
+- `conative_acme_certificate`: a plan in which an order is due no longer needs write rights in Key Vault.
+  The plan read the certificate's pending operation, and Key Vault authorises every request to that
+  endpoint (`/certificates/<name>/pending`), even a read, as `certificates/create/action`. With an
+  identity that may only read certificates, such as one with *Key Vault Reader*, the plan failed with
+  `403 Forbidden`. Plan and refresh now only read the certificate and its versions (`certificates/read`)
+  and show the in-place update with the new version's attributes unknown. The pending operation is read
+  and handled only at apply, before the order: a finished record is deleted as before, a leftover of an
+  earlier failed run is cancelled, and an operation in progress for another issuer fails the apply with
+  an error that names the issuer, before anything is written. Plans in which nothing is due were not
+  affected.
+- The DNS propagation check fails at once, instead of after `dns_propagation_timeout`, when every name
+  server of a zone answers SERVFAIL or REFUSED without the authoritative-answer flag in the first round,
+  which is what a DNS-intercepting proxy may do. Such answers now always come with the hint to set
+  `dns_propagation_check = false`; before, a SERVFAIL without the flag was reported without it. When a
+  name server has several addresses, the check tries the next one after such an answer.
+- Documentation: the permissions table says that a plan, also one with an order due, needs only
+  `certificates/read` in Key Vault, and that the pending-operation endpoint needs
+  `certificates/create/action` and is used only at apply. The guide has a new section on how consumers
+  such as Azure Container Apps and Azure Front Door pick up a new version.
+
+## 0.2.0 (2026-11-21)
 
 ### Added
 

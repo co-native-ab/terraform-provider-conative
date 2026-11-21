@@ -182,8 +182,9 @@ type pollResult struct {
 // proxyHint explains answers without the authoritative-answer flag and says how to skip
 // the check.
 const proxyHint = "The answers did not carry the authoritative-answer flag, so something between this host and the " +
-	"name servers (a DNS-intercepting proxy or secure web gateway) answered instead of them. " +
-	"Set dns_propagation_check = false in the provider's acme settings to skip this check"
+	"name servers (a DNS-intercepting proxy or secure web gateway) answered instead of them, or the name servers " +
+	"do not serve the zone. Set dns_propagation_check = false in the provider's acme settings to skip this check " +
+	"when DNS is intercepted on this network"
 
 func (p pollResult) timeoutError(timeout time.Duration) error {
 	msg := fmt.Sprintf("%v (waited %s)", p.err, timeout)
@@ -293,7 +294,8 @@ type answer struct {
 
 // ask queries one name server for the TXT records of a name: over UDP, with recursion
 // not desired, and over TCP when the answer is truncated. It tries the addresses of the
-// host in order and returns the first answer.
+// host in order and returns the first answer. A SERVFAIL or REFUSED without the
+// authoritative-answer flag is kept only when no other address gives a better answer.
 func (a Authoritative) ask(ctx context.Context, s *server, fqdn string) (answer, error) {
 	if len(s.addrs) == 0 {
 		addrs, err := a.resolver().LookupHost(ctx, absolute(s.host))
@@ -303,12 +305,22 @@ func (a Authoritative) ask(ctx context.Context, s *server, fqdn string) (answer,
 		s.addrs = addrs
 	}
 	var errs []error
+	var failed *answer
 	for _, addr := range s.addrs {
 		ans, err := a.exchange(ctx, net.JoinHostPort(addr, "53"), fqdn)
-		if err == nil {
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case ans.failure:
+			if failed == nil {
+				failed = &ans
+			}
+		default:
 			return ans, nil
 		}
-		errs = append(errs, err)
+	}
+	if failed != nil {
+		return *failed, nil
 	}
 	return answer{}, errors.Join(errs...)
 }

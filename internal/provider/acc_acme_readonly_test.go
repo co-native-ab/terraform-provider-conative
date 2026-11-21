@@ -752,3 +752,44 @@ func TestAccACMERegistration_keyReadForbiddenKeepsState(t *testing.T) {
 		},
 	})
 }
+
+// A finished record of another issuer never blocks an apply: the order deletes it and
+// renews in place.
+func TestAccACMECertificate_finishedRecordOfAnotherIssuerAtApply(t *testing.T) {
+	accPreCheck(t)
+	for _, status := range []string{"completed", "cancelled", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			f := newACMEFixture(t, "P256")
+			opts := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+			due := opts
+			due.MinDays = 100
+			resource.Test(t, resource.TestCase{
+				ProtoV6ProviderFactories: newTestProviderFactories(),
+				Steps: []resource.TestStep{
+					{ConfigVariables: acmeVariables(), Config: f.config(opts)},
+					{
+						PreConfig: func() {
+							acc.ACME.SetValidity(365 * 24 * time.Hour)
+							if err := acc.KeyVault.AddFinishedOperation(f.Cert, "OtherCA", status); err != nil {
+								t.Fatal(err)
+							}
+						},
+						ConfigVariables: acmeVariables(), Config: f.config(due),
+						ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+							plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate),
+						}},
+						Check: func(*terraform.State) error {
+							if n := vaultVersions(f.Cert); n != 2 {
+								return fmt.Errorf("%d issued versions, want 2", n)
+							}
+							if issuer, st, ok := acc.KeyVault.PendingRecord(f.Cert); !ok || issuer != "Unknown" || st != "completed" {
+								return fmt.Errorf("pending record after the renewal: %q %q %v; want the provider's own completed record", issuer, st, ok)
+							}
+							return nil
+						},
+					},
+				},
+			})
+		})
+	}
+}

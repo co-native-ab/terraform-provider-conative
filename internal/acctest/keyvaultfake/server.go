@@ -253,7 +253,8 @@ const (
 )
 
 // dataAction maps a request to the data action Key Vault authorises it with; it is empty
-// for a request the fake does not know, which restricted rights refuse.
+// for a request the fake does not know (for example listing keys or certificates, which
+// the provider never does), which restricted rights refuse.
 func dataAction(method, path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
@@ -272,7 +273,10 @@ func dataAction(method, path string) string {
 	case "certificates":
 		switch {
 		case len(parts) >= 3 && parts[2] == "pending":
-			return ActionCertificatesCreate // reading a pending operation needs it too
+			// Key Vault authorises reading a pending operation as create/action. The fake asks
+			// the same for deleting and merging one: an identity that orders holds it anyway.
+			// (Key Vault may authorise the delete as certificates/update/action instead.)
+			return ActionCertificatesCreate
 		case len(parts) == 3 && parts[2] == "create" && method == http.MethodPost:
 			return ActionCertificatesCreate
 		case method == http.MethodGet && (len(parts) == 2 || len(parts) == 3):

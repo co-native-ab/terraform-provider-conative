@@ -43,6 +43,8 @@ type responder struct {
 	// nsCount is the number of name servers the NS answer lists (one when zero): ns1,
 	// ns2, ... under example.org, at 127.0.0.1, 127.0.0.2, ...
 	nsCount int
+	// extraAddrs lists more addresses (last octets) that ns1 resolves to, after its own.
+	extraAddrs []byte
 }
 
 func startResponder(t *testing.T, txt string, appearAt int32) *responder {
@@ -137,6 +139,11 @@ func (r *responder) answer(in []byte, tcp bool) []byte {
 			last = byte(n)
 		}
 		resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, last}}})
+		if last == 1 {
+			for _, b := range r.extraAddrs {
+				resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, b}}})
+			}
+		}
 	case dnsmessage.TypeTXT:
 		if r.firstTXT.IsZero() {
 			r.firstTXT = time.Now()
@@ -501,5 +508,24 @@ func TestSingleServerFailingWithoutFlagFailsAtOnce(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("took %s", elapsed)
+	}
+}
+
+// A name server with several addresses: when the first answers SERVFAIL without the flag
+// (an intercepted path) and the second answers properly, the proper answer is used.
+func TestFailureWithoutFlagOnOneAddressTriesTheNext(t *testing.T) {
+	r1 := startResponder(t, "value-1", 0)
+	r2 := startResponder(t, "value-1", 0)
+	r1.answerWith(dnsmessage.RCodeServerFailure, false)
+	c := r1.checkerOf(2*time.Second, r2)
+	// One name server (ns1) at 127.0.0.1 (r1) and 127.0.0.2 (r2).
+	r1.mu.Lock()
+	r1.nsCount, r1.extraAddrs = 1, []byte{2}
+	r1.mu.Unlock()
+	if err := c.Wait(context.Background(), rec("value-1")); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if r2.txtQueries() == 0 {
+		t.Error("the second address was never asked")
 	}
 }
