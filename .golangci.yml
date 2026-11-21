@@ -33,6 +33,33 @@ linters:
               desc: the core is pure; file-system and environment access are not allowed
             - pkg: github.com/microsoft/go-mssqldb
               desc: the driver is used only by internal/azuresql/sqlclient
+        acme-pure-core:
+          list-mode: lax
+          files:
+            - "**/internal/acme/*.go"
+            - "!**/internal/acme/*_test.go"
+          deny:
+            - pkg: net/http
+              desc: the core is pure; network access belongs in the service packages under internal/acme
+            - pkg: os
+              desc: the core is pure; file-system and environment access are not allowed
+            - pkg: golang.org/x/crypto/acme
+              desc: the ACME client library is used only by internal/acme/issuer
+        acme-library:
+          list-mode: lax
+          files:
+            - $all
+            - "!**/internal/acme/issuer/**"
+          deny:
+            - pkg: golang.org/x/crypto/acme
+              desc: the ACME client library is used only by internal/acme/issuer
+        acme-no-autocert:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: golang.org/x/crypto/acme/autocert
+              desc: autocert manages certificates by itself and is not used
         no-sign-in-libraries:
           list-mode: lax
           files:
@@ -63,6 +90,8 @@ linters:
       - path: internal/provider/
         linters: [forbidigo]
       - path: internal/acctest/
+        linters: [forbidigo]
+      - path: internal/acme/(keyvault|azuredns|cloudflare|dnscheck|issuer)/
         linters: [forbidigo]
       - path: _test\.go
         linters: [forbidigo, gosec]
