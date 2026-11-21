@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/acmefake"
@@ -22,7 +23,8 @@ import (
 // Env is everything an acceptance run needs: certificates, the fakes of the ACME area,
 // and, for the Azure SQL tests, a SQL Server container with a sign-in proxy in front of
 // it and the token the proxy accepts. The container is started the first time a test asks
-// for it (Container, Proxy, Server, NewProxy), so a run of only the ACME tests never needs
+// for it (Container, Proxy, Server, NewProxy; each takes the test and fails it when the
+// container cannot be started), so a run of only the ACME tests never needs
 // Docker.
 type Env struct {
 	Certs *Certs
@@ -99,42 +101,50 @@ func SetupEnv() (*Env, error) {
 	return e, nil
 }
 
-// startSQL starts the SQL Server container and the sign-in proxy once.
-func (e *Env) startSQL() {
+// startSQL starts the SQL Server container and the sign-in proxy once. When that fails
+// the container is removed again, and every test that needs SQL Server fails with the
+// reason; tests that do not need it are not affected.
+func (e *Env) startSQL(t testing.TB) {
+	t.Helper()
 	e.sqlOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		var err error
 		if e.container, err = StartContainer(ctx); err != nil {
 			e.sqlErr = err
+			e.container = nil
 			return
 		}
 		if e.proxy, err = e.newProxyAt("127.0.0.1:0"); err != nil {
 			e.sqlErr = err
+			e.proxy = nil
+			e.container.Remove()
+			e.container = nil
 			return
 		}
 		e.server = ServerName(e.proxy)
 	})
 	if e.sqlErr != nil {
-		// The Azure SQL tests cannot run without the container; failing here fails the
-		// test that needs it with the reason, instead of every test of the run.
-		panic(fmt.Sprintf("cannot set up SQL Server for the acceptance tests (is Docker running?): %v", e.sqlErr))
+		t.Fatalf("cannot set up SQL Server for the acceptance tests (is Docker running?): %v", e.sqlErr)
 	}
 }
 
 // Container returns the SQL Server container, starting it on first use.
-func (e *Env) Container() *Container { e.startSQL(); return e.container }
+func (e *Env) Container(t testing.TB) *Container { t.Helper(); e.startSQL(t); return e.container }
 
 // Proxy returns the sign-in proxy in front of the container, starting both on first use.
-func (e *Env) Proxy() *tdsproxy.Proxy { e.startSQL(); return e.proxy }
+func (e *Env) Proxy(t testing.TB) *tdsproxy.Proxy { t.Helper(); e.startSQL(t); return e.proxy }
 
 // Server is "localhost:port" of the proxy: what a provider configuration uses. It starts
 // the container on first use.
-func (e *Env) Server() string { e.startSQL(); return e.server }
+func (e *Env) Server(t testing.TB) string { t.Helper(); e.startSQL(t); return e.server }
 
 // NewProxy starts another sign-in proxy in front of the same container, for tests that
 // need to stop one without affecting the others.
-func (e *Env) NewProxy() (*tdsproxy.Proxy, error) { return e.NewProxyAt("127.0.0.1:0") }
+func (e *Env) NewProxy(t testing.TB) (*tdsproxy.Proxy, error) {
+	t.Helper()
+	return e.NewProxyAt(t, "127.0.0.1:0")
+}
 
 // HTTPClient returns an HTTP client for the ACME area that trusts the per-run authority
 // and connects names under vault.azure.net (the fake Key Vault is addressed by one) to the
@@ -143,8 +153,9 @@ func (e *Env) HTTPClient() *http.Client { return e.Certs.HTTPClientWithVault() }
 
 // NewProxyAt starts a sign-in proxy listening on a given address, for example to bring
 // a proxy back on the address of one that was closed.
-func (e *Env) NewProxyAt(listenAddr string) (*tdsproxy.Proxy, error) {
-	e.startSQL()
+func (e *Env) NewProxyAt(t testing.TB, listenAddr string) (*tdsproxy.Proxy, error) {
+	t.Helper()
+	e.startSQL(t)
 	return e.newProxyAt(listenAddr)
 }
 

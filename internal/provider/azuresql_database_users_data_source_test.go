@@ -8,8 +8,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
-func usersDataSourceConfig(db, filters string) string {
-	return providerConfig() + fmt.Sprintf(`
+func usersDataSourceConfig(t testing.TB, db, filters string) string {
+	return providerConfig(t) + fmt.Sprintf(`
 data "conative_azuresql_database_users" "all" {
   database = %q
   %s
@@ -23,7 +23,7 @@ func TestAccDatabaseUsersDataSource_listsOrderedWithoutBuiltIns(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	for _, n := range []string{"zeta", "alpha", "mid"} {
-		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container(t).CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -32,7 +32,7 @@ func TestAccDatabaseUsersDataSource_listsOrderedWithoutBuiltIns(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          usersDataSourceConfig(db, ""),
+			Config:          usersDataSourceConfig(t, db, ""),
 			Check: resource.ComposeTestCheckFunc(
 				resource.TestCheckResourceAttr(usersAddr, "id", db),
 				resource.TestCheckResourceAttr(usersAddr, "users.#", "3"),
@@ -51,7 +51,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	for _, n := range []string{"app", "app2", "APP-other"} {
-		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container(t).CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -60,7 +60,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          usersDataSourceConfig(db, `name = "app2"`),
+				Config:          usersDataSourceConfig(t, db, `name = "app2"`),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(usersAddr, "users.#", "1"),
 					resource.TestCheckResourceAttr(usersAddr, "users.0.name", "app2"),
@@ -68,7 +68,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 			},
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          usersDataSourceConfig(db, `name = "ap"`),
+				Config:          usersDataSourceConfig(t, db, `name = "ap"`),
 				Check:           resource.TestCheckResourceAttr(usersAddr, "users.#", "0"),
 			},
 		},
@@ -78,7 +78,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 func TestAccDatabaseUsersDataSource_principalTypeFilter(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "sqluser"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "sqluser"); err != nil {
 		t.Fatal(err)
 	}
 	resource.Test(t, resource.TestCase{
@@ -87,12 +87,12 @@ func TestAccDatabaseUsersDataSource_principalTypeFilter(t *testing.T) {
 			{
 				// An empty result is not an error.
 				ConfigVariables: tokenVariables(),
-				Config:          usersDataSourceConfig(db, `principal_type = "EXTERNAL_USER"`),
+				Config:          usersDataSourceConfig(t, db, `principal_type = "EXTERNAL_USER"`),
 				Check:           resource.TestCheckResourceAttr(usersAddr, "users.#", "0"),
 			},
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          usersDataSourceConfig(db, `principal_type = "SQL_USER"`),
+				Config:          usersDataSourceConfig(t, db, `principal_type = "SQL_USER"`),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(usersAddr, "users.#", "1"),
 					resource.TestCheckResourceAttr(usersAddr, "users.0.name", "sqluser"),
@@ -109,7 +109,7 @@ func TestAccDatabaseUsersDataSource_rejectsUnknownPrincipalType(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          usersDataSourceConfig(db, `principal_type = "external_user"`),
+			Config:          usersDataSourceConfig(t, db, `principal_type = "external_user"`),
 			PlanOnly:        true,
 			ExpectError:     regexp.MustCompile(`not\s+a\s+database\s+user\s+type`),
 		}},
@@ -123,7 +123,7 @@ func TestAccDatabaseUsersDataSource_emptyDatabase(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          usersDataSourceConfig(db, ""),
+			Config:          usersDataSourceConfig(t, db, ""),
 			Check:           resource.TestCheckResourceAttr(usersAddr, "users.#", "0"),
 		}},
 	})
@@ -132,14 +132,14 @@ func TestAccDatabaseUsersDataSource_emptyDatabase(t *testing.T) {
 func TestAccDatabaseUsersDataSource_namesAreNotInterpolated(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "safe"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "safe"); err != nil {
 		t.Fatal(err)
 	}
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          usersDataSourceConfig(db, `name = "x' OR '1'='1"`),
+			Config:          usersDataSourceConfig(t, db, `name = "x' OR '1'='1"`),
 			Check:           resource.TestCheckResourceAttr(usersAddr, "users.#", "0"),
 		}},
 	})

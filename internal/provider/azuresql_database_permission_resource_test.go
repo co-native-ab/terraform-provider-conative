@@ -17,12 +17,12 @@ import (
 
 const permAddr = "conative_azuresql_database_permission.p"
 
-func permConfig(db, principal, state, permission, schema string) string {
+func permConfig(t testing.TB, db, principal, state, permission, schema string) string {
 	schemaLine := ""
 	if schema != "" {
 		schemaLine = fmt.Sprintf("schema     = %q", schema)
 	}
-	return providerConfig() + fmt.Sprintf(`
+	return providerConfig(t) + fmt.Sprintf(`
 resource "conative_azuresql_database_permission" "p" {
   database   = %q
   principal  = %q
@@ -34,18 +34,18 @@ resource "conative_azuresql_database_permission" "p" {
 }
 
 // reportedState reads the state code the engine holds for a permission, "" for none.
-func reportedState(db string, p azuresql.Permission) (string, error) {
+func reportedState(t testing.TB, db string, p azuresql.Permission) (string, error) {
 	query, args := azuresql.PermissionQuery(p)
-	s, err := acc.Container().QueryStringAsSA(db, query, args...)
+	s, err := acc.Container(t).QueryStringAsSA(db, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return s, err
 }
 
-func permissionCheck(db string, p azuresql.Permission, want string) resource.TestCheckFunc {
+func permissionCheck(t testing.TB, db string, p azuresql.Permission, want string) resource.TestCheckFunc {
 	return func(*terraform.State) error {
-		got, err := reportedState(db, p)
+		got, err := reportedState(t, db, p)
 		if err != nil {
 			return err
 		}
@@ -58,8 +58,8 @@ func permissionCheck(db string, p azuresql.Permission, want string) resource.Tes
 
 // permissionRows lists "CLASS:PERMISSION:STATE" for everything a principal holds, so a
 // test can prove that nothing besides the declared permission changed.
-func permissionRows(db, principal string) (string, error) {
-	conn, err := acc.Container().SA(db)
+func permissionRows(t testing.TB, db, principal string) (string, error) {
+	conn, err := acc.Container(t).SA(db)
 	if err != nil {
 		return "", err
 	}
@@ -85,11 +85,11 @@ func permissionRows(db, principal string) (string, error) {
 func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "reader"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "reader"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "reader", Permission: "VIEW DEFINITION"}
-	before, err := permissionRows(db, "reader")
+	before, err := permissionRows(t, db, "reader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,10 +97,10 @@ func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		CheckDestroy: func(s *terraform.State) error {
-			if err := permissionCheck(db, p, "")(s); err != nil {
+			if err := permissionCheck(t, db, p, "")(s); err != nil {
 				return err
 			}
-			after, err := permissionRows(db, "reader")
+			after, err := permissionRows(t, db, "reader")
 			if err != nil {
 				return err
 			}
@@ -112,14 +112,14 @@ func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "reader", "GRANT", "VIEW DEFINITION", ""),
+				Config:          permConfig(t, db, "reader", "GRANT", "VIEW DEFINITION", ""),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(permAddr, "id", db+"/reader/GRANT/VIEW DEFINITION"),
 					resource.TestCheckResourceAttr(permAddr, "state", "GRANT"),
 					resource.TestCheckNoResourceAttr(permAddr, "schema"),
-					permissionCheck(db, p, "G"),
+					permissionCheck(t, db, p, "G"),
 					func(*terraform.State) error {
-						now, err := permissionRows(db, "reader")
+						now, err := permissionRows(t, db, "reader")
 						if err != nil {
 							return err
 						}
@@ -132,7 +132,7 @@ func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 			},
 			{
 				ConfigVariables:   tokenVariables(),
-				Config:            permConfig(db, "reader", "GRANT", "VIEW DEFINITION", ""),
+				Config:            permConfig(t, db, "reader", "GRANT", "VIEW DEFINITION", ""),
 				ResourceName:      permAddr,
 				ImportState:       true,
 				ImportStateVerify: true,
@@ -144,10 +144,10 @@ func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 func TestAccDatabasePermission_schemaLevelDeny(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "analyst"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "analyst"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [sales];", "CREATE SCHEMA [hr];"); err != nil {
+	if err := acc.Container(t).ExecAsSA(db, "CREATE SCHEMA [sales];", "CREATE SCHEMA [hr];"); err != nil {
 		t.Fatal(err)
 	}
 	sales := azuresql.Permission{Principal: "analyst", Permission: "SELECT", Schema: "sales"}
@@ -156,22 +156,22 @@ func TestAccDatabasePermission_schemaLevelDeny(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             permissionCheck(db, sales, ""),
+		CheckDestroy:             permissionCheck(t, db, sales, ""),
 		Steps: []resource.TestStep{
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "analyst", "DENY", "SELECT", "sales"),
+				Config:          permConfig(t, db, "analyst", "DENY", "SELECT", "sales"),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(permAddr, "id", db+"/analyst/DENY/SELECT/sales"),
 					resource.TestCheckResourceAttr(permAddr, "schema", "sales"),
-					permissionCheck(db, sales, "D"),
-					permissionCheck(db, hr, ""),
-					permissionCheck(db, database, ""),
+					permissionCheck(t, db, sales, "D"),
+					permissionCheck(t, db, hr, ""),
+					permissionCheck(t, db, database, ""),
 				),
 			},
 			{
 				ConfigVariables:   tokenVariables(),
-				Config:            permConfig(db, "analyst", "DENY", "SELECT", "sales"),
+				Config:            permConfig(t, db, "analyst", "DENY", "SELECT", "sales"),
 				ResourceName:      permAddr,
 				ImportState:       true,
 				ImportStateVerify: true,
@@ -187,13 +187,13 @@ func TestAccDatabasePermission_rejectsInvalidPermissions(t *testing.T) {
 		cfg   string
 		match string
 	}{
-		"database permission on a schema": {permConfig(db, "u", "GRANT", "CREATE TABLE", "sales"), `not a permission that can be granted on a schema`},
-		"lower case":                      {permConfig(db, "u", "GRANT", "view definition", ""), `upper case`},
-		"unknown":                         {permConfig(db, "u", "GRANT", "FLY", ""), `not a permission that can be granted on a database`},
-		"injection attempt":               {permConfig(db, "u", "GRANT", "SELECT TO [x]; DROP TABLE y; --", ""), `not a permission`},
-		"bad state":                       {permConfig(db, "u", "REVOKE", "SELECT", ""), `not\s+a\s+valid\s+state`},
-		"lower case state":                {permConfig(db, "u", "grant", "SELECT", ""), `not\s+a\s+valid\s+state`},
-		"empty principal":                 {permConfig(db, "", "GRANT", "SELECT", ""), `must be 1 to 128 characters`},
+		"database permission on a schema": {permConfig(t, db, "u", "GRANT", "CREATE TABLE", "sales"), `not a permission that can be granted on a schema`},
+		"lower case":                      {permConfig(t, db, "u", "GRANT", "view definition", ""), `upper case`},
+		"unknown":                         {permConfig(t, db, "u", "GRANT", "FLY", ""), `not a permission that can be granted on a database`},
+		"injection attempt":               {permConfig(t, db, "u", "GRANT", "SELECT TO [x]; DROP TABLE y; --", ""), `not a permission`},
+		"bad state":                       {permConfig(t, db, "u", "REVOKE", "SELECT", ""), `not\s+a\s+valid\s+state`},
+		"lower case state":                {permConfig(t, db, "u", "grant", "SELECT", ""), `not\s+a\s+valid\s+state`},
+		"empty principal":                 {permConfig(t, db, "", "GRANT", "SELECT", ""), `must be 1 to 128 characters`},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -213,32 +213,32 @@ func TestAccDatabasePermission_rejectsInvalidPermissions(t *testing.T) {
 func TestAccDatabasePermission_driftRevokedOutsideTerraform(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "drifter"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "drifter"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "drifter", Permission: "VIEW DEFINITION"}
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             permissionCheck(db, p, ""),
+		CheckDestroy:             permissionCheck(t, db, p, ""),
 		Steps: []resource.TestStep{
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "drifter", "GRANT", "VIEW DEFINITION", ""),
-				Check:           permissionCheck(db, p, "G"),
+				Config:          permConfig(t, db, "drifter", "GRANT", "VIEW DEFINITION", ""),
+				Check:           permissionCheck(t, db, p, "G"),
 			},
 			{
 				PreConfig: func() {
-					if err := acc.Container().ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [drifter];"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [drifter];"); err != nil {
 						t.Fatal(err)
 					}
 				},
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "drifter", "GRANT", "VIEW DEFINITION", ""),
+				Config:          permConfig(t, db, "drifter", "GRANT", "VIEW DEFINITION", ""),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(permAddr, plancheck.ResourceActionCreate),
 				}},
-				Check: permissionCheck(db, p, "G"),
+				Check: permissionCheck(t, db, p, "G"),
 			},
 		},
 	})
@@ -247,32 +247,32 @@ func TestAccDatabasePermission_driftRevokedOutsideTerraform(t *testing.T) {
 func TestAccDatabasePermission_driftChangedToDeny(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "flipper"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "flipper"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "flipper", Permission: "VIEW DEFINITION"}
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             permissionCheck(db, p, ""),
+		CheckDestroy:             permissionCheck(t, db, p, ""),
 		Steps: []resource.TestStep{
 			{
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "flipper", "GRANT", "VIEW DEFINITION", ""),
-				Check:           permissionCheck(db, p, "G"),
+				Config:          permConfig(t, db, "flipper", "GRANT", "VIEW DEFINITION", ""),
+				Check:           permissionCheck(t, db, p, "G"),
 			},
 			{
 				PreConfig: func() {
-					if err := acc.Container().ExecAsSA(db, "DENY VIEW DEFINITION TO [flipper];"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "DENY VIEW DEFINITION TO [flipper];"); err != nil {
 						t.Fatal(err)
 					}
 				},
 				ConfigVariables: tokenVariables(),
-				Config:          permConfig(db, "flipper", "GRANT", "VIEW DEFINITION", ""),
+				Config:          permConfig(t, db, "flipper", "GRANT", "VIEW DEFINITION", ""),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(permAddr, plancheck.ResourceActionDestroyBeforeCreate),
 				}},
-				Check: permissionCheck(db, p, "G"),
+				Check: permissionCheck(t, db, p, "G"),
 			},
 		},
 	})
@@ -284,20 +284,20 @@ func TestAccDatabasePermission_driftChangedToDeny(t *testing.T) {
 func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "grantor"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "grantor"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "grantor", Permission: "VIEW DEFINITION"}
-	cfg := permConfig(db, "grantor", "GRANT", "VIEW DEFINITION", "")
+	cfg := permConfig(t, db, "grantor", "GRANT", "VIEW DEFINITION", "")
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             permissionCheck(db, p, ""),
+		CheckDestroy:             permissionCheck(t, db, p, ""),
 		Steps: []resource.TestStep{
-			{ConfigVariables: tokenVariables(), Config: cfg, Check: permissionCheck(db, p, "G")},
+			{ConfigVariables: tokenVariables(), Config: cfg, Check: permissionCheck(t, db, p, "G")},
 			{
 				PreConfig: func() {
-					if err := acc.Container().ExecAsSA(db, "GRANT VIEW DEFINITION TO [grantor] WITH GRANT OPTION;"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "GRANT VIEW DEFINITION TO [grantor] WITH GRANT OPTION;"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -317,10 +317,10 @@ func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 			{
 				// Whoever set the grant option removes it; the final cleanup then works.
 				PreConfig: func() {
-					if got, err := reportedState(db, p); err != nil || got != "W" {
+					if got, err := reportedState(t, db, p); err != nil || got != "W" {
 						t.Errorf("the grant option was changed by the failed replacement: %q (%v)", got, err)
 					}
-					if err := acc.Container().ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [grantor] CASCADE;"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [grantor] CASCADE;"); err != nil {
 						t.Errorf("cannot remove the grant option: %v", err)
 					}
 				},
@@ -336,10 +336,10 @@ func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 func TestAccDatabasePermission_existingPermissionSuggestsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "holder"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "holder"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container().ExecAsSA(db, "DENY SELECT TO [holder];"); err != nil {
+	if err := acc.Container(t).ExecAsSA(db, "DENY SELECT TO [holder];"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,11 +348,11 @@ func TestAccDatabasePermission_existingPermissionSuggestsImport(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          permConfig(db, "holder", "GRANT", "SELECT", ""),
+			Config:          permConfig(t, db, "holder", "GRANT", "SELECT", ""),
 			ExpectError:     regexp.MustCompile(`(?s)already\s+holds\s+permission.*import\s+it\s+with\s+terraform\s+import`),
 		}},
 	})
-	if err := permissionCheck(db, azuresql.Permission{Principal: "holder", Permission: "SELECT"}, "D")(nil); err != nil {
+	if err := permissionCheck(t, db, azuresql.Permission{Principal: "holder", Permission: "SELECT"}, "D")(nil); err != nil {
 		t.Errorf("the existing DENY was changed: %v", err)
 	}
 }
@@ -361,11 +361,11 @@ func TestAccDatabasePermission_existingPermissionSuggestsImport(t *testing.T) {
 func TestAccDatabasePermission_implicitConnectNeedsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "fresh"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "fresh"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "fresh", Permission: "CONNECT"}
-	cfg := permConfig(db, "fresh", "GRANT", "CONNECT", "")
+	cfg := permConfig(t, db, "fresh", "GRANT", "CONNECT", "")
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -385,27 +385,27 @@ func TestAccDatabasePermission_implicitConnectNeedsImport(t *testing.T) {
 			},
 			{ConfigVariables: tokenVariables(), Config: cfg, PlanOnly: true},
 		},
-		CheckDestroy: permissionCheck(db, p, ""),
+		CheckDestroy: permissionCheck(t, db, p, ""),
 	})
 }
 
 func TestAccDatabasePermission_importBothForms(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "importer"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "importer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [sales];", "GRANT VIEW DEFINITION TO [importer];", "DENY SELECT ON SCHEMA::[sales] TO [importer];"); err != nil {
+	if err := acc.Container(t).ExecAsSA(db, "CREATE SCHEMA [sales];", "GRANT VIEW DEFINITION TO [importer];", "DENY SELECT ON SCHEMA::[sales] TO [importer];"); err != nil {
 		t.Fatal(err)
 	}
 	dbLevel := azuresql.Permission{Principal: "importer", Permission: "VIEW DEFINITION"}
 	schemaLevel := azuresql.Permission{Principal: "importer", Permission: "SELECT", Schema: "sales"}
 
 	t.Run("database level", func(t *testing.T) {
-		cfg := permConfig(db, "importer", "GRANT", "VIEW DEFINITION", "")
+		cfg := permConfig(t, db, "importer", "GRANT", "VIEW DEFINITION", "")
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-			CheckDestroy:             permissionCheck(db, dbLevel, ""),
+			CheckDestroy:             permissionCheck(t, db, dbLevel, ""),
 			Steps: []resource.TestStep{
 				{
 					ConfigVariables: tokenVariables(), Config: cfg, ResourceName: permAddr, ImportState: true,
@@ -416,10 +416,10 @@ func TestAccDatabasePermission_importBothForms(t *testing.T) {
 		})
 	})
 	t.Run("schema level", func(t *testing.T) {
-		cfg := permConfig(db, "importer", "DENY", "SELECT", "sales")
+		cfg := permConfig(t, db, "importer", "DENY", "SELECT", "sales")
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-			CheckDestroy:             permissionCheck(db, schemaLevel, ""),
+			CheckDestroy:             permissionCheck(t, db, schemaLevel, ""),
 			Steps: []resource.TestStep{
 				{
 					ConfigVariables: tokenVariables(), Config: cfg, ResourceName: permAddr, ImportState: true,
@@ -434,7 +434,7 @@ func TestAccDatabasePermission_importBothForms(t *testing.T) {
 func TestAccDatabasePermission_importRejectsBadIDs(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	cfg := permConfig(db, "u", "GRANT", "SELECT", "")
+	cfg := permConfig(t, db, "u", "GRANT", "SELECT", "")
 	for name, id := range map[string]string{
 		"too few parts":              db + "/u/GRANT",
 		"too many parts":             db + "/u/GRANT/SELECT/s/x",
@@ -462,28 +462,28 @@ func TestAccDatabasePermission_hostileNames(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	hostile := "we]ird'; DROP USER victim; --"
-	if err := acc.Container().CreateUserWithoutLogin(db, "victim"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "victim"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container().CreateUserWithoutLogin(db, hostile); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, hostile); err != nil {
 		t.Fatal(err)
 	}
 	schemaName := "s]chema'; --"
-	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [s]]chema'; --];"); err != nil {
+	if err := acc.Container(t).ExecAsSA(db, "CREATE SCHEMA [s]]chema'; --];"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: hostile, Permission: "SELECT", Schema: schemaName}
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             permissionCheck(db, p, ""),
+		CheckDestroy:             permissionCheck(t, db, p, ""),
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          permConfig(db, hostile, "GRANT", "SELECT", schemaName),
-			Check:           permissionCheck(db, p, "G"),
+			Config:          permConfig(t, db, hostile, "GRANT", "SELECT", schemaName),
+			Check:           permissionCheck(t, db, p, "G"),
 		}},
 	})
-	if exists, err := acc.Container().UserExists(db, "victim"); err != nil || !exists {
+	if exists, err := acc.Container(t).UserExists(db, "victim"); err != nil || !exists {
 		t.Errorf("the user victim was dropped (exists=%v, err=%v)", exists, err)
 	}
 }
@@ -495,11 +495,11 @@ func TestAccDatabasePermission_missingPrincipalReportsEngineError(t *testing.T) 
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          permConfig(db, "ghost", "GRANT", "VIEW DEFINITION", ""),
+			Config:          permConfig(t, db, "ghost", "GRANT", "VIEW DEFINITION", ""),
 			ExpectError:     regexp.MustCompile(`(?s)Cannot set.*ghost`),
 		}},
 	})
-	if exists, err := acc.Container().UserExists(db, "ghost"); err != nil || exists {
+	if exists, err := acc.Container(t).UserExists(db, "ghost"); err != nil || exists {
 		t.Errorf("the provider created the missing principal (exists=%v, err=%v)", exists, err)
 	}
 }
@@ -508,7 +508,7 @@ func TestAccDatabasePermission_missingPrincipalReportsEngineError(t *testing.T) 
 // A newer engine may know more names than the lists hold.
 func TestAccPermissionAllowlistKnownToEngine(t *testing.T) {
 	accPreCheck(t)
-	conn, err := acc.Container().SA("master")
+	conn, err := acc.Container(t).SA("master")
 	if err != nil {
 		t.Fatal(err)
 	}

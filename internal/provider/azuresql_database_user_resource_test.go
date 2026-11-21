@@ -15,8 +15,8 @@ import (
 
 const userAddr = "conative_azuresql_database_user.u"
 
-func userConfig(db, name, userType, entraID string) string {
-	return providerConfig() + fmt.Sprintf(`
+func userConfig(t testing.TB, db, name, userType, entraID string) string {
+	return providerConfig(t) + fmt.Sprintf(`
 resource "conative_azuresql_database_user" "u" {
   database = %q
   name     = %q
@@ -28,9 +28,9 @@ resource "conative_azuresql_database_user" "u" {
 
 const someEntraID = "00000000-0000-0000-0000-000000000001"
 
-func userGone(db, name string) resource.TestCheckFunc {
+func userGone(t testing.TB, db, name string) resource.TestCheckFunc {
 	return func(*terraform.State) error {
-		exists, err := acc.Container().UserExists(db, name)
+		exists, err := acc.Container(t).UserExists(db, name)
 		if err != nil {
 			return err
 		}
@@ -74,10 +74,10 @@ func importFixtureStep(db, name string, cfg string) resource.TestStep {
 func TestAccDatabaseUser_existsSuggestsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "dup"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "dup"); err != nil {
 		t.Fatal(err)
 	}
-	sidBefore, err := acc.Container().QueryStringAsSA(db, "SELECT CONVERT(varchar(100), sid, 1) FROM sys.database_principals WHERE name = 'dup'")
+	sidBefore, err := acc.Container(t).QueryStringAsSA(db, "SELECT CONVERT(varchar(100), sid, 1) FROM sys.database_principals WHERE name = 'dup'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +86,12 @@ func TestAccDatabaseUser_existsSuggestsImport(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config:          userConfig(db, "dup", "application", someEntraID),
+			Config:          userConfig(t, db, "dup", "application", someEntraID),
 			ExpectError:     regexp.MustCompile(`(?s)already\s+exists\s+in\s+database.*import\s+it\s+with\s+terraform\s+import`),
 		}},
 	})
 
-	sidAfter, err := acc.Container().QueryStringAsSA(db, "SELECT CONVERT(varchar(100), sid, 1) FROM sys.database_principals WHERE name = 'dup'")
+	sidAfter, err := acc.Container(t).QueryStringAsSA(db, "SELECT CONVERT(varchar(100), sid, 1) FROM sys.database_principals WHERE name = 'dup'")
 	if err != nil || sidAfter != sidBefore {
 		t.Errorf("the existing user changed: sid %q -> %q (%v)", sidBefore, sidAfter, err)
 	}
@@ -104,10 +104,10 @@ func TestAccDatabaseUser_existsSuggestsImport(t *testing.T) {
 func TestAccDatabaseUser_importShowsMismatch(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "imp"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "imp"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := userConfig(db, "imp", "application", someEntraID)
+	cfg := userConfig(t, db, "imp", "application", someEntraID)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -123,7 +123,7 @@ func TestAccDatabaseUser_importShowsMismatch(t *testing.T) {
 			},
 		},
 	})
-	if err := userGone(db, "imp")(nil); err != nil {
+	if err := userGone(t, db, "imp")(nil); err != nil {
 		t.Errorf("the replacement did not drop the imported user first: %v", err)
 	}
 }
@@ -131,14 +131,14 @@ func TestAccDatabaseUser_importShowsMismatch(t *testing.T) {
 func TestAccDatabaseUser_destroyDropsUser(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "doomed"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "doomed"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := userConfig(db, "doomed", "application", someEntraID)
+	cfg := userConfig(t, db, "doomed", "application", someEntraID)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             userGone(db, "doomed"),
+		CheckDestroy:             userGone(t, db, "doomed"),
 		Steps:                    []resource.TestStep{importFixtureStep(db, "doomed", cfg)},
 	})
 }
@@ -146,17 +146,17 @@ func TestAccDatabaseUser_destroyDropsUser(t *testing.T) {
 func TestAccDatabaseUser_destroyRefusedWhenOwningSchema(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "owner"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [owned] AUTHORIZATION [owner];"); err != nil {
+	if err := acc.Container(t).ExecAsSA(db, "CREATE SCHEMA [owned] AUTHORIZATION [owner];"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := userConfig(db, "owner", "application", someEntraID)
+	cfg := userConfig(t, db, "owner", "application", someEntraID)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             userGone(db, "owner"),
+		CheckDestroy:             userGone(t, db, "owner"),
 		Steps: []resource.TestStep{
 			importFixtureStep(db, "owner", cfg),
 			{
@@ -168,11 +168,11 @@ func TestAccDatabaseUser_destroyRefusedWhenOwningSchema(t *testing.T) {
 			{
 				// The user is still there; hand the schema back so the final cleanup works.
 				PreConfig: func() {
-					exists, err := acc.Container().UserExists(db, "owner")
+					exists, err := acc.Container(t).UserExists(db, "owner")
 					if err != nil || !exists {
 						t.Errorf("the user was dropped although it owns a schema (exists=%v, err=%v)", exists, err)
 					}
-					if err := acc.Container().ExecAsSA(db, "ALTER AUTHORIZATION ON SCHEMA::[owned] TO [dbo];"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "ALTER AUTHORIZATION ON SCHEMA::[owned] TO [dbo];"); err != nil {
 						t.Errorf("cannot release the schema: %v", err)
 					}
 				},
@@ -188,10 +188,10 @@ func TestAccDatabaseUser_destroyRefusedWhenOwningSchema(t *testing.T) {
 func TestAccDatabaseUser_drift(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "vanishing"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "vanishing"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := userConfig(db, "vanishing", "application", someEntraID)
+	cfg := userConfig(t, db, "vanishing", "application", someEntraID)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -199,7 +199,7 @@ func TestAccDatabaseUser_drift(t *testing.T) {
 			importFixtureStep(db, "vanishing", cfg),
 			{
 				PreConfig: func() {
-					if err := acc.Container().ExecAsSA(db, "DROP USER [vanishing];"); err != nil {
+					if err := acc.Container(t).ExecAsSA(db, "DROP USER [vanishing];"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -221,7 +221,7 @@ func TestAccDatabaseUser_hostileNames(t *testing.T) {
 	db := newDatabase(t)
 	names := []string{"we]ird", "o'brien; --", "x]]; DROP TABLE y; --", "with space", "naïve-名前", strings.Repeat("n", 128)}
 	for _, n := range names {
-		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container(t).CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatalf("cannot create fixture %q: %v", n, err)
 		}
 	}
@@ -229,12 +229,12 @@ func TestAccDatabaseUser_hostileNames(t *testing.T) {
 	for i, n := range names {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-			CheckDestroy:             userGone(db, n),
-			Steps:                    []resource.TestStep{importFixtureStep(db, n, userConfig(db, n, "application", someEntraID))},
+			CheckDestroy:             userGone(t, db, n),
+			Steps:                    []resource.TestStep{importFixtureStep(db, n, userConfig(t, db, n, "application", someEntraID))},
 		})
 		// Each test case destroyed its imported user; the others are untouched.
 		for _, other := range names[i+1:] {
-			if exists, err := acc.Container().UserExists(db, other); err != nil || !exists {
+			if exists, err := acc.Container(t).UserExists(db, other); err != nil || !exists {
 				t.Fatalf("user %q disappeared (exists=%v, err=%v)", other, exists, err)
 			}
 		}
@@ -249,12 +249,12 @@ func TestAccDatabaseUser_rejectsInvalidConfiguration(t *testing.T) {
 		cfg   string
 		match string
 	}{
-		"unknown type":    {userConfig(db, "u", "robot", someEntraID), `is not a valid type`},
-		"bad entra id":    {userConfig(db, "u", "user", "not-a-guid"), `must be a GUID`},
-		"empty name":      {userConfig(db, "", "user", someEntraID), `must be 1 to 128 characters`},
-		"over-long name":  {userConfig(db, long, "user", someEntraID), `must be 1 to 128 characters`},
-		"empty database":  {userConfig("", "u", "user", someEntraID), `must be 1 to 128 characters`},
-		"braced entra id": {userConfig(db, "u", "user", "{"+someEntraID+"}"), `must be a GUID`},
+		"unknown type":    {userConfig(t, db, "u", "robot", someEntraID), `is not a valid type`},
+		"bad entra id":    {userConfig(t, db, "u", "user", "not-a-guid"), `must be a GUID`},
+		"empty name":      {userConfig(t, db, "", "user", someEntraID), `must be 1 to 128 characters`},
+		"over-long name":  {userConfig(t, db, long, "user", someEntraID), `must be 1 to 128 characters`},
+		"empty database":  {userConfig(t, "", "u", "user", someEntraID), `must be 1 to 128 characters`},
+		"braced entra id": {userConfig(t, db, "u", "user", "{"+someEntraID+"}"), `must be a GUID`},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -275,7 +275,7 @@ func TestAccDatabaseUser_rejectsInvalidConfiguration(t *testing.T) {
 // engine uses for a uniqueidentifier.
 func TestAccSIDMatchesEngineGUIDBytes(t *testing.T) {
 	accPreCheck(t)
-	db, err := acc.Container().SA("master")
+	db, err := acc.Container(t).SA("master")
 	if err != nil {
 		t.Fatal(err)
 	}

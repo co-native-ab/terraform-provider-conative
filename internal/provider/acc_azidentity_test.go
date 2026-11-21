@@ -53,12 +53,12 @@ func TestAccProvider_tokenFromAzidentity(t *testing.T) {
 	t.Setenv("TF_ACC_TEMP_DIR", dir)
 	t.Setenv(azidentityTokenEnv, acc.Token)
 	db := newDatabase(t)
-	if err := acc.Container().CreateUserWithoutLogin(db, "reader"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "reader"); err != nil {
 		t.Fatal(err)
 	}
 	var files int
 
-	cfg := azidentityConfig(acc.Server(), fmt.Sprintf(`
+	cfg := azidentityConfig(acc.Server(t), fmt.Sprintf(`
 resource "conative_azuresql_database_role_member" "m" {
   database = %[1]q
   role     = "db_datareader"
@@ -79,7 +79,7 @@ data "conative_azuresql_database_user" "reader" {
 			{
 				Config: cfg,
 				Check: resource.ComposeTestCheckFunc(
-					memberCheck(db, "db_datareader", "reader", true),
+					memberCheck(t, db, "db_datareader", "reader", true),
 					resource.TestCheckResourceAttr(user, "id", db+"/reader"),
 					resource.TestCheckResourceAttr(user, "principal_type", "SQL_USER"),
 					workdirHasNoToken(t, dir, &files),
@@ -92,7 +92,7 @@ data "conative_azuresql_database_user" "reader" {
 			},
 		},
 	})
-	if ok, err := isMember(db, "db_datareader", "reader"); err != nil || ok {
+	if ok, err := isMember(t, db, "db_datareader", "reader"); err != nil || ok {
 		t.Errorf("after destroy: member = %t, err = %v; want the membership removed", ok, err)
 	}
 	if files == 0 {
@@ -111,7 +111,7 @@ func TestAccProvider_wrongTokenFromAzidentityFailsFast(t *testing.T) {
 		ExternalProviders:        azidentityProvider,
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
-			Config: azidentityConfig(acc.Server(), fmt.Sprintf(`
+			Config: azidentityConfig(acc.Server(t), fmt.Sprintf(`
 data "conative_azuresql_database_users" "all" {
   database = %q
 }
