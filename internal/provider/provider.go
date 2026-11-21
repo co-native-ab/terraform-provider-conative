@@ -23,17 +23,22 @@ var _ provider.Provider = (*conativeProvider)(nil)
 
 type conativeProvider struct {
 	version string
+	// acmeEnv holds the endpoints and checks of the ACME area. New fills the production
+	// values; only tests in this package construct a provider with others, so that no
+	// setting or environment variable can redirect a token.
+	acmeEnv acmeEnv
 }
 
 // New returns a provider factory for the given provider version.
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
-		return &conativeProvider{version: version}
+		return &conativeProvider{version: version, acmeEnv: productionACMEEnv()}
 	}
 }
 
 type providerModel struct {
 	AzureSQL types.Object `tfsdk:"azuresql"`
+	ACME     types.Object `tfsdk:"acme"`
 }
 
 type azureSQLModel struct {
@@ -51,8 +56,11 @@ func (p *conativeProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 	resp.Schema = schema.Schema{
 		Description: "Manages resources that the major cloud providers do not cover, or do not cover well. " +
 			"The first area is Azure SQL Database: Microsoft Entra principals as contained database users, " +
-			"their role memberships and their permissions.",
+			"their role memberships and their permissions. " +
+			"The second is ACME: certificates from an ACME certificate authority such as Let's Encrypt, " +
+			"issued into Azure Key Vault with DNS-01 challenges in Azure DNS or Cloudflare.",
 		Attributes: map[string]schema.Attribute{
+			"acme": acmeSettingsSchema(),
 			"azuresql": schema.SingleNestedAttribute{
 				Description: "Settings for Azure SQL Database resources and data sources. " +
 					"Required only when one of them is used.",
@@ -126,8 +134,13 @@ func (p *conativeProvider) Configure(ctx context.Context, req provider.Configure
 		}
 		access = newAzureSQL(settings, resp)
 	}
-	resp.ResourceData = access
-	resp.DataSourceData = access
+
+	data := &providerData{azuresql: access, acme: p.configureACME(ctx, cfg.ACME, resp)}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.ResourceData = data
+	resp.DataSourceData = data
 }
 
 // newAzureSQL turns the settings into a client, or records why it cannot.
@@ -166,6 +179,8 @@ func (p *conativeProvider) Resources(_ context.Context) []func() resource.Resour
 		NewDatabaseUserResource,
 		NewDatabaseRoleMemberResource,
 		NewDatabasePermissionResource,
+		NewACMERegistrationResource,
+		NewACMECertificateResource,
 	}
 }
 

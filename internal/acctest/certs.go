@@ -4,6 +4,7 @@
 package acctest
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,8 +14,10 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -23,7 +26,8 @@ type Certs struct {
 	// CAFile is a PEM file holding the authority certificate. Point SSL_CERT_FILE at
 	// it so that clients trust the server certificate.
 	CAFile string
-	// Server is the certificate to present, valid for localhost and 127.0.0.1.
+	// Server is the certificate to present, valid for localhost, 127.0.0.1 and names under
+	// vault.azure.net.
 	Server tls.Certificate
 	// CAPool holds the authority for clients that take a pool directly.
 	CAPool *x509.CertPool
@@ -65,7 +69,7 @@ func NewCerts(dir string) (*Certs, error) {
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
+		DNSNames:     []string{"localhost", "*.vault.azure.net"},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 	srvDER, err := x509.CreateCertificate(rand.Reader, srvTmpl, caCert, &srvKey.PublicKey, caKey)
@@ -85,4 +89,26 @@ func NewCerts(dir string) (*Certs, error) {
 		CAPool: pool,
 		Server: tls.Certificate{Certificate: [][]byte{srvDER, caDER}, PrivateKey: srvKey},
 	}, nil
+}
+
+// HTTPClientWithVault is like HTTPClient, and also connects every host under
+// .vault.azure.net to the loopback interface on the port of the connection (the fake
+// vault listens there).
+func (c *Certs) HTTPClientWithVault() *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: c.CAPool, MinVersion: tls.VersionTLS12},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if host, port, err := net.SplitHostPort(addr); err == nil && strings.HasSuffix(host, ".vault.azure.net") {
+				addr = net.JoinHostPort("127.0.0.1", port)
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}}
+}
+
+// HTTPClient returns a client that trusts the per-run authority directly, for unit tests
+// that run without SSL_CERT_FILE.
+func (c *Certs) HTTPClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: c.CAPool, MinVersion: tls.VersionTLS12}}}
 }

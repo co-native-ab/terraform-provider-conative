@@ -12,11 +12,19 @@ their database- and schema-level permissions. The provider authenticates with a 
 token that you supply, so it works with whatever identity your Terraform run already uses. It never signs
 in by itself and never stores or logs the token.
 
+The second area is **ACME certificates in Azure Key Vault**: an account with an ACME certificate authority
+such as Let's Encrypt whose key lives in Key Vault, and certificates issued through DNS-01 challenges in
+Azure DNS and Cloudflare. Key Vault generates the certificate's private key, so it never reaches Terraform
+or the state, and renewal adds a new version to the same Key Vault certificate. Existing Key Vault
+certificates can be imported. See the [ACME guide](docs/guides/acme-certificates-in-key-vault.md).
+
 | Type | Name |
 | --- | --- |
 | Resource | `conative_azuresql_database_user` |
 | Resource | `conative_azuresql_database_role_member` |
 | Resource | `conative_azuresql_database_permission` |
+| Resource | `conative_acme_registration` |
+| Resource | `conative_acme_certificate` |
 | Data source | `conative_azuresql_database_user` |
 | Data source | `conative_azuresql_database_users` |
 
@@ -77,10 +85,42 @@ resource "conative_azuresql_database_role_member" "orders_app_owner" {
 }
 ```
 
+## Example: an ACME certificate
+
+The ACME resources take two more tokens, for `https://vault.azure.net/.default` and
+`https://management.azure.com/.default`, from the same provider. The Cloudflare token is a write-only
+argument (Terraform 1.11 or later).
+
+```hcl
+provider "conative" {
+  acme = {
+    key_vault_access_token        = ephemeral.azidentity_default_credential.key_vault.access_token
+    resource_manager_access_token = ephemeral.azidentity_default_credential.resource_manager.access_token
+  }
+}
+
+resource "conative_acme_certificate" "example" {
+  registration_id   = conative_acme_registration.letsencrypt.id
+  key_vault_url     = azurerm_key_vault.example.vault_uri
+  certificate_name  = "example-com"
+  common_name       = "example.com"
+  subject_alternative_names = ["*.example.com"]
+  key_type          = "RSA4096"
+  revoke_on_destroy = true
+
+  cloudflare {
+    zone          = "example.com"
+    match_domains = ["example.com"]
+    api_token     = ephemeral.azurerm_key_vault_secret.cloudflare_token.value
+  }
+}
+```
+
 ## Documentation
 
 See [`docs/`](docs/index.md) for the provider, every resource and data source, and a
-[guide](docs/guides/azure-sql-entra-principals.md) to how sign-in, user creation, import and retries work.
+guide to [Azure SQL](docs/guides/azure-sql-entra-principals.md) (sign-in, user creation, import and retries)
+and to [ACME certificates](docs/guides/acme-certificates-in-key-vault.md).
 
 ## Requirements
 
@@ -88,6 +128,10 @@ See [`docs/`](docs/index.md) for the provider, every resource and data source, a
   variable.
 - A Microsoft Entra access token for `https://database.windows.net/.default`, with the permissions needed
   for what you manage.
+- For the ACME resources: Terraform 1.11 or later (write-only arguments), and access tokens for
+  `https://vault.azure.net/.default` and, for Azure DNS, `https://management.azure.com/.default`. The
+  DNS propagation check needs direct UDP and TCP access to port 53 of the zone's name servers; behind a
+  DNS-intercepting proxy set `dns_propagation_check = false` in the `acme` settings.
 
 ## Development
 

@@ -23,7 +23,7 @@ import (
 func TestAccProvider_connects(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "smoke"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "smoke"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -31,7 +31,7 @@ func TestAccProvider_connects(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config: providerConfig() + `
+			Config: providerConfig(t) + `
 data "conative_azuresql_database_users" "all" {
   database = "` + db + `"
 }
@@ -67,7 +67,9 @@ func readDataSourceDiagnostics(t *testing.T, server, token, typeName string, cfg
 	str := tftypes.String
 	settingsType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{"server": str, "access_token": str, "retry_timeout": str}}
 	providerType := schemas.Provider.ValueType()
+	acmeType := providerType.(tftypes.Object).AttributeTypes["acme"]
 	providerCfg, err := tfprotov6.NewDynamicValue(providerType, tftypes.NewValue(providerType, map[string]tftypes.Value{
+		"acme": tftypes.NewValue(acmeType, nil),
 		"azuresql": tftypes.NewValue(settingsType, map[string]tftypes.Value{
 			"server":        tftypes.NewValue(str, server),
 			"access_token":  tftypes.NewValue(str, token),
@@ -185,7 +187,7 @@ func TestAccProvider_wrongTokenFailsFast(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariablesFor(acc.WrongToken),
-			Config: providerConfig() + `
+			Config: providerConfig(t) + `
 data "conative_azuresql_database_users" "all" {
   database = "` + db + `"
 }
@@ -199,7 +201,7 @@ data "conative_azuresql_database_users" "all" {
 
 	// Terraform rewraps diagnostics, so the messages themselves are read from the
 	// provider protocol.
-	text := readDataSourceDiagnostics(t, acc.Server, acc.WrongToken, "conative_azuresql_database_users", map[string]tftypes.Value{
+	text := readDataSourceDiagnostics(t, acc.Server(t), acc.WrongToken, "conative_azuresql_database_users", map[string]tftypes.Value{
 		"database": tftypes.NewValue(tftypes.String, db),
 	})
 	if !strings.Contains(text, "Login failed") {
@@ -224,7 +226,7 @@ func TestAccProvider_missingDatabaseFailsWithTheEngineError(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			ConfigVariables: tokenVariables(),
-			Config: providerConfig() + `
+			Config: providerConfig(t) + `
 data "conative_azuresql_database_users" "all" {
   database = "does_not_exist"
 }
@@ -250,7 +252,7 @@ data "conative_azuresql_database_users" "all" {
 func TestAccProvider_transientErrorIsRetriedUntilSuccess(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	proxy, err := acc.NewProxy()
+	proxy, err := acc.NewProxy(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +277,7 @@ func TestAccProvider_transientErrorIsRetriedUntilSuccess(t *testing.T) {
 func TestAccProvider_transientErrorStopsAtTheRetryTimeout(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	proxy, err := acc.NewProxy()
+	proxy, err := acc.NewProxy(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +302,7 @@ func TestAccProvider_transientErrorStopsAtTheRetryTimeout(t *testing.T) {
 func TestAccProvider_retryDisabledFailsAtOnce(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	proxy, err := acc.NewProxy()
+	proxy, err := acc.NewProxy(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +327,7 @@ func TestAccProvider_retryDisabledFailsAtOnce(t *testing.T) {
 func TestAccProvider_otherErrorsAreNotRetried(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	proxy, err := acc.NewProxy()
+	proxy, err := acc.NewProxy(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,10 +379,10 @@ data "conative_azuresql_database_users" "all" {
 func TestAccProvider_connectionFailureKeepsState(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "stays"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "stays"); err != nil {
 		t.Fatal(err)
 	}
-	proxy, err := acc.NewProxy()
+	proxy, err := acc.NewProxy(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +401,7 @@ resource "conative_azuresql_database_role_member" "m" {
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			{ConfigVariables: tokenVariables(), Config: cfg, Check: memberCheck(db, "db_datareader", "stays", true)},
+			{ConfigVariables: tokenVariables(), Config: cfg, Check: memberCheck(t, db, "db_datareader", "stays", true)},
 			{
 				// Sign-in refused: the refresh fails, and the resource must stay in state.
 				PreConfig:    func() { proxy.RejectAll(true) },
@@ -425,7 +427,7 @@ resource "conative_azuresql_database_role_member" "m" {
 			{
 				// Bring the server back on the same address: nothing was lost.
 				PreConfig: func() {
-					p, err := acc.NewProxyAt(addr)
+					p, err := acc.NewProxyAt(t, addr)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -437,7 +439,7 @@ resource "conative_azuresql_database_role_member" "m" {
 			{ConfigVariables: tokenVariables(), Config: cfg, PlanOnly: true},
 		},
 	})
-	if ok, err := isMember(db, "db_datareader", "stays"); err == nil && ok {
+	if ok, err := isMember(t, db, "db_datareader", "stays"); err == nil && ok {
 		t.Error("the membership survived the final destroy")
 	}
 }
@@ -486,18 +488,18 @@ func TestAccProvider_tokenNotInStateOrPlan(t *testing.T) {
 	t.Setenv("TF_ACC_TEMP_DIR", dir)
 	db := newDatabase(t)
 	for _, n := range []string{"holder", "imported"} {
-		if err := acc.Container.CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container(t).CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := acc.Container.CreateUserWithoutLogin(db, "viewer"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	var files, plans int
 
 	// Everything that can be applied in the container: a membership, a permission at
 	// database and schema level, and both data sources.
-	cfg := providerConfig() + fmt.Sprintf(`
+	cfg := providerConfig(t) + fmt.Sprintf(`
 resource "conative_azuresql_database_role_member" "m" {
   database = %[1]q
   role     = "db_datareader"
@@ -545,10 +547,10 @@ data "conative_azuresql_database_users" "all" {
 
 	// The database user resource: an imported user, with the token searched for in the
 	// state after the import and the refresh.
-	userCfg := userConfig(db, "imported", "application", someEntraID)
+	userCfg := userConfig(t, db, "imported", "application", someEntraID)
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             userGone(db, "imported"),
+		CheckDestroy:             userGone(t, db, "imported"),
 		Steps: []resource.TestStep{
 			importFixtureStep(db, "imported", userCfg),
 			{
@@ -574,12 +576,12 @@ data "conative_azuresql_database_users" "all" {
 func TestAccProvider_tokenNotInLogs(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "logged"); err != nil {
+	if err := acc.Container(t).CreateUserWithoutLogin(db, "logged"); err != nil {
 		t.Fatal(err)
 	}
 	logPath := acctest.EnableTraceLogs(t, t.TempDir())
 
-	cfg := providerConfig() + fmt.Sprintf(`
+	cfg := providerConfig(t) + fmt.Sprintf(`
 resource "conative_azuresql_database_role_member" "m" {
   database = %[1]q
   role     = "db_datareader"
@@ -594,7 +596,7 @@ resource "conative_azuresql_database_role_member" "m" {
 				Config:          cfg,
 				ExpectError:     regexp.MustCompile(`(?s)Login\s+failed`),
 			},
-			{ConfigVariables: tokenVariables(), Config: cfg, Check: memberCheck(db, "db_datareader", "logged", true)},
+			{ConfigVariables: tokenVariables(), Config: cfg, Check: memberCheck(t, db, "db_datareader", "logged", true)},
 			{ConfigVariables: tokenVariables(), Config: cfg, PlanOnly: true},
 		},
 	})
