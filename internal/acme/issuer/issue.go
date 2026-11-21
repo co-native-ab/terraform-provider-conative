@@ -218,6 +218,7 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	// The records are no longer needed. Remove them before finalizing, so that a failure
 	// to clean up stops the order instead of leaving them behind.
 	if rerr := removeAll(ctx, &written); rerr != nil {
+		written = nil // the error names the records that are left; do not repeat it
 		return Result{}, rerr
 	}
 

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -97,13 +98,17 @@ func setupDNS(t *testing.T) {
 	acc.KeyVault.SetFailure(0)
 	acc.AzureDNS.FailWrites(false)
 	acc.Cloudflare.FailWrites(false)
-	t.Cleanup(func() {
+	reset := func() {
 		acc.ACME.ClearFailures()
 		acc.KeyVault.SetFailure(0)
 		acc.AzureDNS.FailWrites(false)
+		acc.AzureDNS.FailDeletes(false)
 		acc.Cloudflare.FailWrites(false)
+		acc.Cloudflare.FailDeletes(false)
 		acc.DNS.Reset()
-	})
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 // acmeFixture is a Key Vault account key and the names a test uses.
@@ -184,6 +189,10 @@ func (f acmeFixture) certHCL(s certSpec) string {
 	if s.Registrat == "" {
 		s.Registrat = "conative_acme_registration.r.id"
 	}
+	revoke := "revoke_on_destroy         = " + s.Revoke
+	if s.Revoke == "omit" {
+		revoke = ""
+	}
 	var sans []string
 	for _, n := range s.SANs {
 		sans = append(sans, fmt.Sprintf("%q", n))
@@ -200,11 +209,11 @@ resource "conative_acme_certificate" %q {
   common_name               = %q
   subject_alternative_names = [%s]
   key_type                  = %q
-  revoke_on_destroy         = %s
+  %s
   %s
   %s
 }
-`, s.Resource, s.Registrat, s.VaultURL, f.Cert, s.CN, strings.Join(sans, ", "), s.KeyType, s.Revoke, days, s.Blocks)
+`, s.Resource, s.Registrat, s.VaultURL, f.Cert, s.CN, strings.Join(sans, ", "), s.KeyType, revoke, days, s.Blocks)
 }
 
 // config is the whole configuration of a certificate test step.
@@ -251,4 +260,12 @@ func ecBits(c *x509.Certificate) int {
 		return k.Curve.Params().BitSize
 	}
 	return 0
+}
+
+func ipList(addrs ...string) []net.IP {
+	var out []net.IP
+	for _, a := range addrs {
+		out = append(out, net.ParseIP(a))
+	}
+	return out
 }
