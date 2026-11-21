@@ -2,12 +2,12 @@
 page_title: "conative Provider"
 subcategory: ""
 description: |-
-    Manages resources that the major cloud providers do not cover, or do not cover well. The first area is Azure SQL Database: Microsoft Entra principals as contained database users, their role memberships and their permissions.
+    Manages resources that the major cloud providers do not cover, or do not cover well. The first area is Azure SQL Database: Microsoft Entra principals as contained database users, their role memberships and their permissions. The second is ACME: certificates from an ACME certificate authority such as Let's Encrypt, issued into Azure Key Vault with DNS-01 challenges in Azure DNS or Cloudflare.
 ---
 
 # conative Provider
 
-Manages resources that the major cloud providers do not cover, or do not cover well. The first area is Azure SQL Database: Microsoft Entra principals as contained database users, their role memberships and their permissions.
+Manages resources that the major cloud providers do not cover, or do not cover well. The first area is Azure SQL Database: Microsoft Entra principals as contained database users, their role memberships and their permissions. The second is ACME: certificates from an ACME certificate authority such as Let's Encrypt, issued into Azure Key Vault with DNS-01 challenges in Azure DNS or Cloudflare.
 
 See the [Azure SQL guide](guides/azure-sql-entra-principals) for how the access token, user creation,
 import and retries work.
@@ -113,7 +113,20 @@ provider "conative" {
 
 ### Optional
 
+- `acme` (Attributes) Settings for the ACME resources. Required only when one of them is used. (see [below for nested schema](#nestedatt--acme))
 - `azuresql` (Attributes) Settings for Azure SQL Database resources and data sources. Required only when one of them is used. (see [below for nested schema](#nestedatt--azuresql))
+
+<a id="nestedatt--acme"></a>
+### Nested Schema for `acme`
+
+Required:
+
+- `key_vault_access_token` (String, Sensitive) A Microsoft Entra access token for `https://vault.azure.net/.default`. Used to sign ACME requests with the account key and to create, read, merge and delete certificates in Key Vault. The provider never signs in by itself, never stores the token and never writes it to logs. Supply it from an ephemeral resource or ephemeral variable.
+
+Optional:
+
+- `resource_manager_access_token` (String, Sensitive) A Microsoft Entra access token for `https://management.azure.com/.default`, used to write DNS-01 challenge records in Azure DNS. Required when a certificate has an `azure_dns` block.
+
 
 <a id="nestedatt--azuresql"></a>
 ### Nested Schema for `azuresql`
