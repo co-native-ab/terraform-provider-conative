@@ -1,0 +1,22 @@
+# Binaries
+/terraform-provider-conative
+/terraform-provider-conative_*
+*.exe
+*.test
+dist/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# Coverage
+*.out
+coverage.*
+
+# Editors
+.idea/
+.vscode/
