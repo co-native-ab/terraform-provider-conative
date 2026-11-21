@@ -256,15 +256,12 @@ const (
 // them. The list is empty for a request the fake does not know (for example listing keys
 // or certificates, which the provider never does), which restricted rights refuse.
 //
-// For the pending operation of a certificate (/certificates/{name}/pending), Key Vault
-// authorises reading it as certificates/create/action, although Microsoft's REST
-// reference names the get permission for that request. For deleting (and updating) a
-// pending operation the REST reference names the update permission; which data action
-// Key Vault really checks is not documented, and the observed read shows that the REST
-// reference is not a reliable guide for this endpoint. The documented permissions
-// therefore list every candidate (create/action, update/action and delete), and the fake
-// requires all of them, so that dropping any one from the documentation fails a test.
-// Merging is authorised as certificates/create/action.
+// Key Vault authorises every request to the pending operation of a certificate
+// (/certificates/{name}/pending), whether it reads, deletes, cancels (PATCH) or merges,
+// as certificates/create/action, although Microsoft's REST reference names the get and
+// update permissions for these requests. certificates/update/action and
+// certificates/delete neither replace nor add to it, so the fake requires
+// certificates/create/action alone, as Key Vault does.
 func dataActions(method, path string) []string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
@@ -282,10 +279,8 @@ func dataActions(method, path string) []string {
 		}
 	case "certificates":
 		switch {
-		case len(parts) >= 3 && parts[2] == "pending" && (method == http.MethodDelete || method == http.MethodPatch):
-			return []string{ActionCertificatesCreate, ActionCertificatesUpdate, ActionCertificatesDelete}
 		case len(parts) >= 3 && parts[2] == "pending":
-			return []string{ActionCertificatesCreate} // read, merge
+			return []string{ActionCertificatesCreate} // read, delete, cancel, merge
 		case len(parts) == 3 && parts[2] == "create" && method == http.MethodPost:
 			return []string{ActionCertificatesCreate}
 		case method == http.MethodGet && (len(parts) == 2 || len(parts) == 3):

@@ -157,10 +157,11 @@ policy, and it changes nothing.
 See [Permissions](../guides/acme-certificates-in-key-vault#permissions) in the guide for the minimum
 Azure RBAC data actions per operation. Refresh, import and plan need only `certificates/read` in Key Vault,
 also when an order is due (such a plan also reads the DNS zones). They never touch the certificate's pending
-operation, which Key Vault authorises as `certificates/create/action` even for a read. Ordering and renewing
-need the certificate read, create, update and delete rights (the last three for the pending operation) and the
-account key's read and sign rights, destroying needs the delete right, and nothing ever reads a secret. The guide also explains how to force a renewal and
-exactly what `revoke_on_destroy` revokes.
+operation, which Key Vault authorises as `certificates/create/action` for every request, even a read.
+Ordering and renewing need only `certificates/read` and `certificates/create/action` on the certificate and
+`keys/read` and `keys/sign/action` on the account key. Destroying needs `certificates/delete`, and with
+`revoke_on_destroy = true` also `certificates/read`, `keys/read` and `keys/sign/action`. Nothing ever reads a
+secret. The guide also explains how to force a renewal and exactly what `revoke_on_destroy` revokes.
 
 ## Import
 
