@@ -129,7 +129,9 @@ and to [ACME certificates](docs/guides/acme-certificates-in-key-vault.md).
 - A Microsoft Entra access token for `https://database.windows.net/.default`, with the permissions needed
   for what you manage.
 - For the ACME resources: Terraform 1.11 or later (write-only arguments), and access tokens for
-  `https://vault.azure.net/.default` and, for Azure DNS, `https://management.azure.com/.default`.
+  `https://vault.azure.net/.default` and, for Azure DNS, `https://management.azure.com/.default`. The
+  DNS propagation check needs direct UDP and TCP access to port 53 of the zone's name servers; behind a
+  DNS-intercepting proxy set `dns_propagation_check = false` in the `acme` settings.
 
 ## Development
 

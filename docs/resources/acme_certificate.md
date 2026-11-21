@@ -60,11 +60,11 @@ resource "conative_acme_certificate" "example" {
 ### Required
 
 - `certificate_name` (String) The Key Vault certificate name. The resource owns this certificate; creating it fails if the name already holds an issued certificate (import it instead). Changing it replaces the resource.
-- `common_name` (String) The certificate's common name, at most 64 characters; always also a subject alternative name. Changing it issues a new version. Some certificate authorities leave the common name out of the certificate they issue; the provider then keeps the configured value.
+- `common_name` (String) The certificate's common name, at most 64 characters; always also a subject alternative name. Changing it issues a new version. Some certificate authorities leave the common name out of the certificate they issue; the provider then keeps the configured value. It is null after importing a certificate that has no subject common name; the names are then all in `subject_alternative_names` until the configuration is applied.
 - `key_type` (String) `RSA2048`, `RSA3072`, `RSA4096`, `P256`, `P384`, `P521`. The certificate authority decides which it accepts (Let's Encrypt does not accept `P521`). Changing it issues a new version.
-- `key_vault_url` (String) The vault URL, for example `https://example.vault.azure.net/`. The host must end in `.vault.azure.net`; access tokens are sent to no other host. Changing it to another vault replaces the resource; a different spelling of the same URL does not.
-- `registration_id` (String) The `id` of a `conative_acme_registration`. Changing it to a registration at another certificate authority (a different `server_url`, for example from a staging to a production directory) orders a new certificate in place; changing it to another account at the same authority, or setting it after an import, only updates the state.
-- `revoke_on_destroy` (Boolean) Whether destroying the resource revokes the certificate at the authority before deleting it from Key Vault. The version revoked is the one this resource issued last (`issued_version`), not necessarily the current version. It is skipped when that version has expired or is gone, and for a certificate that was imported and not yet renewed by this resource (it was issued elsewhere): destroy then warns and only deletes it. Revoking signs a request with the account key.
+- `key_vault_url` (String) The vault URL, for example `https://example.vault.azure.net/`. The host must end in `.vault.azure.net`; access tokens are sent to no other host. Changing it to another vault replaces the resource; a different spelling of the same URL (a trailing slash, the case of the host) is no change at all.
+- `registration_id` (String) The `id` of a `conative_acme_registration`. Changing it to a registration at another certificate authority (a different `server_url`, for example from a staging to a production directory) orders a new certificate in place; changing it to another account at the same authority, or setting it after an import, only updates the state. When the registration is replaced in the same run, so that this value is not known until apply, the certificate is ordered again.
+- `revoke_on_destroy` (Boolean) Whether destroying the resource revokes the certificate at the authority before deleting it from Key Vault. The version revoked is the one this resource issued last (`issued_version`), not necessarily the current version. It is skipped when that version has expired or is gone, and for a certificate that was imported and not yet renewed by this resource (it was issued elsewhere): destroy then warns and only deletes it. It is revoked with the account that ordered it, also when `registration_id` has moved to another account at the same authority since; if that account's key no longer exists, destroy warns and does not revoke. Revoking signs a request with the account key.
 
 ### Optional
 
@@ -108,7 +108,7 @@ Optional:
 
 > **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
 
-- `api_token` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) A Cloudflare API token with Zone Read and DNS Edit on the zone. Write-only: never stored in the plan or the state. Needs Terraform 1.11 or later. Supply it from an ephemeral value. Optional because it is needed only when an order runs (a new certificate, a renewal or a change that orders): plans in which nothing is ordered succeed without it. When an order is planned and a name of the order is served by this block, a missing token is an error.
+- `api_token` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) A Cloudflare API token with Zone Read and DNS Edit on the zone. Write-only: never stored in the plan or the state. Needs Terraform 1.11 or later. Supply it from an ephemeral value. Optional because it is needed only when an order runs (a new certificate, a renewal or a change that orders): plans in which nothing is ordered succeed without it. When an order is planned and a name of the order is served by this block, a missing token is an error. A read-only token can plan but not apply, except that an apply writes no record, and so succeeds, for a name whose authorization the certificate authority still holds as valid.
 
 ## Importing an existing certificate
 
@@ -121,11 +121,12 @@ policy, and it changes nothing.
   `certificate_pem`, `not_after`, `thumbprint`, `common_name` (the subject common name),
   `subject_alternative_names` (the certificate's DNS names in lower case, without the common name) and
   `key_type` (from the public key). `min_days_remaining` is set to `30`.
-- Key Vault cannot report `registration_id`, `revoke_on_destroy` or the DNS blocks. The first plan after
-  import therefore always shows one in-place update that only records them (and `min_days_remaining` if it
-  is not `30`, and `key_vault_url` if it is written differently, for example with a trailing `/`). Applying
-  it contacts neither the certificate authority nor Key Vault nor any DNS zone for a change. The plan after
-  that shows no changes.
+- Key Vault cannot report `registration_id`, `revoke_on_destroy`, the DNS blocks or a `min_days_remaining`
+  other than `30`. Terraform plans a change from "not set" to the configured value for each of them, and a
+  provider cannot turn that into an empty plan, so the first plan after an import shows one in-place update.
+  **The first apply after an import records these arguments in state and sends no request:** it contacts
+  neither the certificate authority nor Key Vault nor any DNS zone. The plan after that is empty. A different
+  spelling of `key_vault_url` (a trailing `/`, the case of the host) is never a change.
 - If the certificate is within `min_days_remaining` days of expiry, or its names or key type differ from the
   configuration, the first plan instead shows an update that orders a new certificate.
 - The issuer, policy, lifetime actions and key exportability of the imported certificate never cause an
@@ -134,12 +135,17 @@ policy, and it changes nothing.
   this resource's (issuer `Unknown`, exportable key, the configured key type and names, no automatic
   actions). The versionless certificate and secret IDs stay the same, so services that use them pick up the
   new version. Until then, Key Vault keeps acting on the old policy: a version it adds on its own triggers a
-  renewal at the next plan, and a pending request to another issuer makes the order fail until it is
-  cancelled.
-- Import fails, and nothing is stored, when the certificate has no issued version, has no subject common
-  name, has a common name that is not one of its DNS names, has a subject alternative name that is not a DNS
-  name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has a key other than
-  RSA 2048/3072/4096 or EC P-256/P-384/P-521.
+  renewal at the next plan, and an operation in progress for another issuer makes the order fail until it
+  finishes or is cancelled. A finished operation record, for example the one the `Self` issuer leaves, never
+  blocks anything.
+- A certificate without a subject common name can be imported: `common_name` is recorded as null and all of
+  the certificate's DNS names become `subject_alternative_names`. When the configured `common_name` and
+  `subject_alternative_names` together make up exactly those names, the first apply is the state-only update
+  described above.
+- Import fails, and nothing is stored, when the certificate has no issued version, has neither a common
+  name nor a DNS name, has a common name that is not one of its DNS names, has a subject alternative name
+  that is not a DNS name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has
+  a key other than RSA 2048/3072/4096 or EC P-256/P-384/P-521.
 - The first order replaces the certificate policy including its content type, which becomes
   `application/x-pkcs12`. A certificate that was imported with a PEM secret becomes a PKCS #12 secret from then
   on; consumers that read the secret must be able to handle that.

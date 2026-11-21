@@ -83,6 +83,11 @@ The `conative_acme_registration` and `conative_acme_certificate` resources take 
 - `resource_manager_access_token`, for `https://management.azure.com/.default`. It writes the challenge records
   in Azure DNS, so it is needed only when a certificate has an `azure_dns` block.
 
+Two more settings, `dns_propagation_check` and `dns_propagation_timeout`, control how the provider waits for
+the challenge records to be visible; the check needs direct access to port 53 of the zone's name servers and
+is to be turned off behind a DNS-intercepting proxy (see the
+[ACME guide](guides/acme-certificates-in-key-vault#the-dns-propagation-check)).
+
 Both tokens are sensitive and are never stored or logged. Obtain them from the same `azidentity` provider, one
 ephemeral resource per scope. The Cloudflare API token of a certificate is not a provider setting: it is a
 write-only argument on the certificate itself. Using write-only arguments needs Terraform 1.11 or later.
@@ -180,6 +185,8 @@ Required:
 
 Optional:
 
+- `dns_propagation_check` (Boolean) Whether to wait until the challenge records are visible on the zone's authoritative name servers before the certificate authority is asked to validate them. Default `true`. The check waits five seconds, then queries every name server of the zone directly (UDP, with a fall back to TCP, port 53) every five seconds and trusts only answers that carry the authoritative-answer flag. It needs direct access to port 53 of those name servers and does not work behind a DNS-intercepting proxy or secure web gateway, which answers on their behalf; set this to `false` there. When it is `false` the provider still waits five seconds after writing the records and then lets the certificate authority validate them.
+- `dns_propagation_timeout` (String) How long the propagation check keeps polling, as a Go duration such as `90s` or `5m`, between `10s` and `30m`. Default `2m`. Ignored when `dns_propagation_check` is `false`.
 - `resource_manager_access_token` (String, Sensitive) A Microsoft Entra access token for `https://management.azure.com/.default`, used to write DNS-01 challenge records in Azure DNS. Optional: it is needed only when an order runs (a new certificate or a renewal) for names served by an `azure_dns` block. Refreshing and planning, and plans in which nothing is ordered, do not need it. When an order is planned and the token is missing, the plan fails and names the block.
 
 

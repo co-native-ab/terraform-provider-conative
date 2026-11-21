@@ -57,7 +57,9 @@ that live in the repository under `internal/acctest`:
 - `keyvaultfake`: Key Vault keys (sign for RSA and EC) and certificates (create with the issuer `Unknown`,
   pending request with a signing request, merge, versions, delete).
 - `azurednsfake` and `cloudflarefake`: the TXT record parts of the Azure DNS Resource Manager API and the
-  Cloudflare API. Both write to the same `dnsstore` that the certificate authority reads.
+  Cloudflare API. Both write to the same `dnsstore` that the certificate authority reads. The DNS
+  propagation check of the provider is replaced in the tests by one that reads that store; its own
+  behaviour is unit-tested against a loopback DNS responder in `internal/acme/dnscheck`.
 
 SQL Server is started only when an Azure SQL acceptance test first needs it, so running only the ACME
 tests (`-run 'TestAccACME|TestAccProvider_acme'`) never starts a container. The provider accepts only Key
@@ -115,7 +117,10 @@ The provider depends on the Terraform plugin framework, the Microsoft SQL Server
 `golang.org/x/crypto` and the standard library. `golang.org/x/crypto/acme` is the RFC 8555 client,
 maintained by the Go project and BSD-licensed; only the `internal/acme/issuer` package imports it, and
 `acme/autocert` must not be used. The Key Vault, Azure DNS and Cloudflare clients are plain HTTP on purpose,
-to avoid pulling in the Azure and Cloudflare SDKs. Justify every new dependency in the pull request. Nothing that signs in to Microsoft Entra
+to avoid pulling in the Azure and Cloudflare SDKs. The DNS propagation check in `internal/acme/dnscheck`
+imports `golang.org/x/net/dns/dnsmessage` to build and read the DNS queries it sends to a zone's name servers
+(the standard resolver cannot clear the recursion flag or report the authoritative-answer flag); `x/net` is
+already a dependency of the module, so this adds no module. Justify every new dependency in the pull request. Nothing that signs in to Microsoft Entra
 ID may be added: the caller supplies the access token, and CI fails if such a package appears in the build.
 
 ## Code guidelines

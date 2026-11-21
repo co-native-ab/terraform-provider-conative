@@ -31,11 +31,12 @@ policy, and it changes nothing.
   `certificate_pem`, `not_after`, `thumbprint`, `common_name` (the subject common name),
   `subject_alternative_names` (the certificate's DNS names in lower case, without the common name) and
   `key_type` (from the public key). `min_days_remaining` is set to `30`.
-- Key Vault cannot report `registration_id`, `revoke_on_destroy` or the DNS blocks. The first plan after
-  import therefore always shows one in-place update that only records them (and `min_days_remaining` if it
-  is not `30`, and `key_vault_url` if it is written differently, for example with a trailing `/`). Applying
-  it contacts neither the certificate authority nor Key Vault nor any DNS zone for a change. The plan after
-  that shows no changes.
+- Key Vault cannot report `registration_id`, `revoke_on_destroy`, the DNS blocks or a `min_days_remaining`
+  other than `30`. Terraform plans a change from "not set" to the configured value for each of them, and a
+  provider cannot turn that into an empty plan, so the first plan after an import shows one in-place update.
+  **The first apply after an import records these arguments in state and sends no request:** it contacts
+  neither the certificate authority nor Key Vault nor any DNS zone. The plan after that is empty. A different
+  spelling of `key_vault_url` (a trailing `/`, the case of the host) is never a change.
 - If the certificate is within `min_days_remaining` days of expiry, or its names or key type differ from the
   configuration, the first plan instead shows an update that orders a new certificate.
 - The issuer, policy, lifetime actions and key exportability of the imported certificate never cause an
@@ -44,12 +45,17 @@ policy, and it changes nothing.
   this resource's (issuer `Unknown`, exportable key, the configured key type and names, no automatic
   actions). The versionless certificate and secret IDs stay the same, so services that use them pick up the
   new version. Until then, Key Vault keeps acting on the old policy: a version it adds on its own triggers a
-  renewal at the next plan, and a pending request to another issuer makes the order fail until it is
-  cancelled.
-- Import fails, and nothing is stored, when the certificate has no issued version, has no subject common
-  name, has a common name that is not one of its DNS names, has a subject alternative name that is not a DNS
-  name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has a key other than
-  RSA 2048/3072/4096 or EC P-256/P-384/P-521.
+  renewal at the next plan, and an operation in progress for another issuer makes the order fail until it
+  finishes or is cancelled. A finished operation record, for example the one the `Self` issuer leaves, never
+  blocks anything.
+- A certificate without a subject common name can be imported: `common_name` is recorded as null and all of
+  the certificate's DNS names become `subject_alternative_names`. When the configured `common_name` and
+  `subject_alternative_names` together make up exactly those names, the first apply is the state-only update
+  described above.
+- Import fails, and nothing is stored, when the certificate has no issued version, has neither a common
+  name nor a DNS name, has a common name that is not one of its DNS names, has a subject alternative name
+  that is not a DNS name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has
+  a key other than RSA 2048/3072/4096 or EC P-256/P-384/P-521.
 - The first order replaces the certificate policy including its content type, which becomes
   `application/x-pkcs12`. A certificate that was imported with a PEM secret becomes a PKCS #12 secret from then
   on; consumers that read the secret must be able to handle that.

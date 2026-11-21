@@ -105,14 +105,16 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 				MarkdownDescription: "The `id` of a `conative_acme_registration`. Changing it to a registration at " +
 					"another certificate authority (a different `server_url`, for example from a staging to a production " +
 					"directory) orders a new certificate in place; changing it to another account at the same authority, " +
-					"or setting it after an import, only updates the state.",
+					"or setting it after an import, only updates the state. When the registration is replaced in the " +
+					"same run, so that this value is not known until apply, the certificate is ordered again.",
 				Required:   true,
 				Validators: []validator.String{checkString("must be <server_url>|<account_key_id>", validateRegistrationID)},
 			},
 			"key_vault_url": schema.StringAttribute{
 				MarkdownDescription: "The vault URL, for example `https://example.vault.azure.net/`. The host must end in " +
 					"`.vault.azure.net`; access tokens are sent to no other host. Changing it to " +
-					"another vault replaces the resource; a different spelling of the same URL does not.",
+					"another vault replaces the resource; a different spelling of the same URL (a trailing slash, the case " +
+					"of the host) is no change at all.",
 				CustomType:    vaultURLType{},
 				Required:      true,
 				Validators:    []validator.String{checkString("must be a Key Vault URL such as https://example.vault.azure.net/", validateVaultURL)},
@@ -129,7 +131,9 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 			"common_name": schema.StringAttribute{
 				MarkdownDescription: "The certificate's common name, at most 64 characters; always also a subject alternative name. " +
 					"Changing it issues a new version. Some certificate authorities leave the common name out of the " +
-					"certificate they issue; the provider then keeps the configured value.",
+					"certificate they issue; the provider then keeps the configured value. It is null after importing a " +
+					"certificate that has no subject common name; the names are then all in " +
+					"`subject_alternative_names` until the configuration is applied.",
 				Required: true,
 			},
 			"subject_alternative_names": schema.SetAttribute{
@@ -157,8 +161,10 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 					"deleting it from Key Vault. The version revoked is the one this resource issued last " +
 					"(`issued_version`), not necessarily the current version. It is skipped when that version has " +
 					"expired or is gone, and for a certificate that was imported and not yet renewed by this resource " +
-					"(it was issued elsewhere): destroy then warns and only deletes it. Revoking signs a request " +
-					"with the account key.",
+					"(it was issued elsewhere): destroy then warns and only deletes it. It is revoked with the account " +
+					"that ordered it, also when `registration_id` has moved to another account at the same authority " +
+					"since; if that account's key no longer exists, destroy warns and does not revoke. Revoking signs a " +
+					"request with the account key.",
 				Required: true,
 			},
 			"id": schema.StringAttribute{
@@ -233,7 +239,9 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 							"ephemeral value. Optional because it is needed only when an order runs (a new " +
 							"certificate, a renewal or a change that orders): plans in which nothing is ordered succeed " +
 							"without it. When an order is planned and a name of the order is served by this block, a " +
-							"missing token is an error.",
+							"missing token is an error. A read-only token can plan but not apply, except that an apply " +
+							"writes no record, and so succeeds, for a name whose authorization the certificate " +
+							"authority still holds as valid.",
 						Optional:  true,
 						WriteOnly: true,
 						Sensitive: true,

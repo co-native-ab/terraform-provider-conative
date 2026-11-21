@@ -41,6 +41,11 @@ The `conative_acme_registration` and `conative_acme_certificate` resources take 
 - `resource_manager_access_token`, for `https://management.azure.com/.default`. It writes the challenge records
   in Azure DNS, so it is needed only when a certificate has an `azure_dns` block.
 
+Two more settings, `dns_propagation_check` and `dns_propagation_timeout`, control how the provider waits for
+the challenge records to be visible; the check needs direct access to port 53 of the zone's name servers and
+is to be turned off behind a DNS-intercepting proxy (see the
+[ACME guide](guides/acme-certificates-in-key-vault#the-dns-propagation-check)).
+
 Both tokens are sensitive and are never stored or logged. Obtain them from the same `azidentity` provider, one
 ephemeral resource per scope. The Cloudflare API token of a certificate is not a provider setting: it is a
 write-only argument on the certificate itself. Using write-only arguments needs Terraform 1.11 or later.
