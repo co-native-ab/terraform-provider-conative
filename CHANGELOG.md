@@ -7,6 +7,8 @@ bumps the minor version.
 
 ## Unreleased
 
+## 0.1.0 (2026-11-21)
+
 ### Added
 
 - Provider settings `azuresql` with `server`, `access_token` (sensitive; never stored or logged) and
