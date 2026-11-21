@@ -111,7 +111,7 @@ func TestInspectForImport(t *testing.T) {
 	rsa1024, _ := rsa.GenerateKey(rand.Reader, 1024) //nolint:gosec // a small key is the point of the test
 	p224, _ := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
 	_, edKey, _ := ed25519.GenerateKey(rand.Reader)
-	rsa8192 := rsaOrNil(t)
+	rsaOdd := rsaOrNil(t)
 	cases := map[string]struct {
 		o    leafOptions
 		want string
@@ -125,11 +125,11 @@ func TestInspectForImport(t *testing.T) {
 		"ec p224":         {leafOptions{cn: "example.com", dns: []string{"example.com"}, key: p224}, "EC P-224"},
 		"ed25519":         {leafOptions{cn: "example.com", dns: []string{"example.com"}, key: edKey}, "not one of"},
 	}
-	if rsa8192 != nil {
-		cases["rsa 8192"] = struct {
+	if rsaOdd != nil {
+		cases["rsa 2560"] = struct {
 			o    leafOptions
 			want string
-		}{leafOptions{cn: "example.com", dns: []string{"example.com"}, key: rsa8192}, "RSA 8192"}
+		}{leafOptions{cn: "example.com", dns: []string{"example.com"}, key: rsaOdd}, "RSA 2560"}
 	}
 	for name, c := range cases {
 		if _, err := InspectForImport(leaf(t, c.o)); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -146,7 +146,8 @@ func rsaOrNil(t *testing.T) *rsa.PrivateKey {
 	if testing.Short() {
 		return nil
 	}
-	k, _ := rsa.GenerateKey(rand.Reader, 8192)
+	// A size between the supported ones is as unsupported as 8192 and much cheaper to make.
+	k, _ := rsa.GenerateKey(rand.Reader, 2560)
 	return k
 }
 
