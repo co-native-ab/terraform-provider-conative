@@ -87,6 +87,14 @@ func (s *Server) FailDeletes(b bool) {
 	s.failDelete = b
 }
 
+// Reset removes every record and clears the failure controls; zones and tokens stay.
+func (s *Server) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = map[string]record{}
+	s.failWrites, s.failDelete = false, false
+}
+
 // Seed puts a TXT record into a zone from outside the provider and returns its ID.
 func (s *Server) Seed(zoneName, fqdn, content string) string {
 	s.mu.Lock()

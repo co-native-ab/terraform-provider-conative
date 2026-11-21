@@ -105,6 +105,8 @@ func setupDNS(t *testing.T) {
 		acc.AzureDNS.FailDeletes(false)
 		acc.Cloudflare.FailWrites(false)
 		acc.Cloudflare.FailDeletes(false)
+		acc.AzureDNS.Reset()
+		acc.Cloudflare.Reset()
 		acc.DNS.Reset()
 	}
 	reset()

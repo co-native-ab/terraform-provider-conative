@@ -76,6 +76,16 @@ func (s *Server) FailDeletes(b bool) {
 	s.failDelete = b
 }
 
+// Reset removes every record set and clears the failure controls; zones stay.
+func (s *Server) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, z := range s.zones {
+		z.sets = map[string]*set{}
+	}
+	s.failWrites, s.failDelete = false, false
+}
+
 // Seed puts a record into a set from outside the provider, as another writer would.
 func (s *Server) Seed(sub, rg, zoneName, relName string, values ...string) {
 	s.mu.Lock()
