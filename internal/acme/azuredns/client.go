@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
@@ -19,10 +21,17 @@ import (
 )
 
 const (
-	apiVersion  = "2018-05-01"
-	defaultTTL  = 60
-	maxAttempts = 3
-	maxResponse = 4 << 20
+	apiVersion = "2018-05-01"
+	defaultTTL = 60
+	// maxAttempts bounds how often a write that lost the race for a record set's ETag is
+	// repeated. Several orders for names that share a challenge record name write the
+	// same record set at once.
+	maxAttempts = 10
+	// defaultRetryBase is the first pause before a repeated write; it doubles for every
+	// attempt, up to maxRetryPause, and is jittered.
+	defaultRetryBase = 100 * time.Millisecond
+	maxRetryPause    = 5 * time.Second
+	maxResponse      = 4 << 20
 )
 
 // ErrNotFound is matched (with errors.Is) by an error for a 404 answer.
@@ -49,9 +58,39 @@ func (e *APIError) Is(target error) bool {
 
 // Client talks to Resource Manager with one access token.
 type Client struct {
-	base  string
-	token string
-	http  *http.Client
+	base      string
+	token     string
+	http      *http.Client
+	retryBase time.Duration
+}
+
+// SetRetryBase sets the first pause before a write is repeated after an ETag conflict
+// (default 100 ms); tests shorten it.
+func (c *Client) SetRetryBase(d time.Duration) { c.retryBase = d }
+
+// retryPause returns the jittered, exponentially growing pause before attempt n+1
+// (n counts from 1): between half and the whole of base*2^(n-1), at most maxRetryPause.
+func (c *Client) retryPause(n int) time.Duration {
+	base := c.retryBase
+	if base <= 0 {
+		base = defaultRetryBase
+	}
+	d := base << min(n-1, 20)
+	if d <= 0 || d > maxRetryPause {
+		d = maxRetryPause
+	}
+	return d/2 + time.Duration(rand.Int64N(int64(d/2)+1)) //nolint:gosec // jitter, not a secret
+}
+
+func (c *Client) pause(ctx context.Context, n int) error {
+	t := time.NewTimer(c.retryPause(n))
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // New returns a client for the Resource Manager endpoint at baseURL (https only).
@@ -207,7 +246,8 @@ func isPreconditionFailed(err error) bool {
 
 // Add adds TXT values to the record set name of a zone, keeping every value that is
 // already there. The write is guarded by the set's ETag; when it changed in the
-// meantime the set is read again, at most three times.
+// meantime (another order writes the same record set) the set is read again after a
+// jittered, growing pause, at most ten times.
 func (c *Client) Add(ctx context.Context, sub, rg, zone, name string, values []string) error {
 	var last error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -231,6 +271,10 @@ func (c *Client) Add(ctx context.Context, sub, rg, zone, name string, values []s
 			return err
 		}
 		last = err
+		tflog.Debug(ctx, "the record set changed during the update; trying again", map[string]any{"attempt": attempt + 1})
+		if perr := c.pause(ctx, attempt+1); perr != nil {
+			return perr
+		}
 	}
 	return fmt.Errorf("the record set %s changed too often while it was updated: %w", name, last)
 }
@@ -270,6 +314,10 @@ func (c *Client) Remove(ctx context.Context, sub, rg, zone, name string, values 
 			return err
 		}
 		last = err
+		tflog.Debug(ctx, "the record set changed during the update; trying again", map[string]any{"attempt": attempt + 1})
+		if perr := c.pause(ctx, attempt+1); perr != nil {
+			return perr
+		}
 	}
 	return fmt.Errorf("the record set %s changed too often while it was updated: %w", name, last)
 }

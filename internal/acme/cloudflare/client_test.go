@@ -91,3 +91,78 @@ func TestZoneLookupAndErrors(t *testing.T) {
 		t.Error("an http URL was accepted")
 	}
 }
+
+// Two orders for one name can publish the same value. The second finds the identical
+// record, uses it and never deletes it: the first one owns it.
+func TestIdenticalRecordIsUsedButNotOwned(t *testing.T) {
+	srv, store, c, _ := start(t)
+	srv.RefuseIdenticalRecords(true)
+	ctx := context.Background()
+	const name = "_acme-challenge.example.com"
+
+	first := cloudflare.NewZonePublisher(c, "example.com")
+	second := cloudflare.NewZonePublisher(c, "example.com")
+	if err := first.Publish(ctx, name, []string{"shared"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Publish(ctx, name, []string{"shared", "own"}); err != nil {
+		t.Fatalf("an identical record must not fail the publish: %v", err)
+	}
+	if got := store.Values(name); len(got) != 2 {
+		t.Fatalf("records: %v", got)
+	}
+	if err := second.Remove(ctx, name, []string{"shared", "own"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Values(name); !slices.Equal(got, []string{"shared"}) {
+		t.Errorf("the second publisher removed a record it does not own: %v", got)
+	}
+	if err := first.Remove(ctx, name, []string{"shared"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Values(name); len(got) != 0 {
+		t.Errorf("records are left: %v", got)
+	}
+}
+
+// A create that failed after Cloudflare stored the record leaves no ID. Remove looks
+// the record up by name and content and deletes it.
+func TestUnknownCreateOutcomeIsCleanedUp(t *testing.T) {
+	srv, store, c, _ := start(t)
+	srv.CommitThenFail(true)
+	ctx := context.Background()
+	const name = "_acme-challenge.example.com"
+	srv.Seed("example.com", name, "foreign")
+
+	p := cloudflare.NewZonePublisher(c, "example.com")
+	if err := p.Publish(ctx, name, []string{"ours"}); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("want the failure, got %v", err)
+	}
+	if got := store.Values(name); len(got) != 2 {
+		t.Fatalf("the fake should have committed the record: %v", got)
+	}
+	srv.CommitThenFail(false)
+	if err := p.Remove(ctx, name, []string{"ours"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Values(name); !slices.Equal(got, []string{"foreign"}) {
+		t.Errorf("want only the foreign record left, got %v", got)
+	}
+}
+
+func TestForbiddenWriteSaysWhichPermissionIsNeeded(t *testing.T) {
+	srv, _, _, certs := start(t)
+	srv.AddReadOnlyToken("read-only-token", "example.com")
+	c, err := cloudflare.New(srv.APIURL(), "read-only-token", certs.HTTPClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cloudflare.NewZonePublisher(c, "example.com")
+	err = p.Publish(context.Background(), "_acme-challenge.example.com", []string{"v"})
+	if err == nil || !strings.Contains(err.Error(), "DNS Edit permission on the zone") || !strings.Contains(err.Error(), "read-only token can plan but not apply") {
+		t.Fatalf("want a hint about DNS Edit, got %v", err)
+	}
+	if strings.Contains(err.Error(), "read-only-token") {
+		t.Errorf("the token is in the error: %v", err)
+	}
+}

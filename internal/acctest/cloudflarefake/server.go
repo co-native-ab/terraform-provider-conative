@@ -35,6 +35,8 @@ type Server struct {
 	failWrites bool
 	failDelete bool
 	readOnly   map[string]bool // tokens that may only read
+	refuseDup  bool
+	commitFail bool
 }
 
 // Start serves the fake over HTTPS. The API path prefix is /client/v4.
@@ -97,12 +99,28 @@ func (s *Server) FailDeletes(b bool) {
 	s.failDelete = b
 }
 
+// RefuseIdenticalRecords makes creating a TXT record that already exists with the same
+// name and content answer 400 with error 81058, as Cloudflare does.
+func (s *Server) RefuseIdenticalRecords(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuseDup = b
+}
+
+// CommitThenFail makes creating a record store it and then answer 500, so that the
+// client does not learn the record's ID: the outcome of the request is unknown to it.
+func (s *Server) CommitThenFail(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commitFail = b
+}
+
 // Reset removes every record and clears the failure controls; zones and tokens stay.
 func (s *Server) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.records = map[string]record{}
-	s.failWrites, s.failDelete = false, false
+	s.failWrites, s.failDelete, s.refuseDup, s.commitFail = false, false, false, false
 }
 
 // Seed puts a TXT record into a zone from outside the provider and returns its ID.
@@ -171,6 +189,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{"id": id, "name": r.URL.Query().Get("name"), "name_servers": []string{"ns1.example.org"}})
 		}
 		reply(w, http.StatusOK, out)
+	case len(parts) == 3 && parts[0] == "zones" && parts[2] == "dns_records" && r.Method == http.MethodGet:
+		if !allowed[parts[1]] {
+			fail(w, http.StatusForbidden, 9109, "Unauthorized to access requested resource")
+			return
+		}
+		q := r.URL.Query()
+		var out []map[string]any
+		for id, rec := range s.records {
+			if rec.zoneID != parts[1] || (q.Get("type") != "" && q.Get("type") != "TXT") ||
+				(q.Get("name") != "" && !strings.EqualFold(q.Get("name"), rec.name)) ||
+				(q.Get("content") != "" && q.Get("content") != rec.content) {
+				continue
+			}
+			out = append(out, map[string]any{"id": id, "type": "TXT", "name": rec.name, "content": rec.content})
+		}
+		reply(w, http.StatusOK, out)
 	case len(parts) == 3 && parts[0] == "zones" && parts[2] == "dns_records" && r.Method == http.MethodPost:
 		if !allowed[parts[1]] {
 			fail(w, http.StatusForbidden, 9109, "Unauthorized to access requested resource")
@@ -185,10 +219,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, 9005, "invalid record")
 			return
 		}
+		if s.refuseDup {
+			for _, rec := range s.records {
+				if rec.zoneID == parts[1] && strings.EqualFold(rec.name, b.Name) && rec.content == b.Content {
+					fail(w, http.StatusBadRequest, 81058, "An identical record already exists.")
+					return
+				}
+			}
+		}
 		s.seq++
 		id := fmt.Sprintf("rec%04d", s.seq)
 		s.records[id] = record{zoneID: parts[1], name: b.Name, content: b.Content}
 		s.store.Add(b.Name, b.Content)
+		if s.commitFail {
+			fail(w, http.StatusInternalServerError, 1000, "the request failed after it was committed (test control)")
+			return
+		}
 		reply(w, http.StatusOK, map[string]any{"id": id, "type": "TXT", "name": b.Name, "content": b.Content})
 	case len(parts) == 4 && parts[0] == "zones" && parts[2] == "dns_records" && r.Method == http.MethodDelete:
 		if !allowed[parts[1]] {

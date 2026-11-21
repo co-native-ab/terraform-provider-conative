@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/dnsstore"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/fakehttp"
@@ -40,6 +42,7 @@ type Server struct {
 	failWrites bool
 	failDelete bool
 	etagSeq    int
+	latency    atomic.Int64
 }
 
 // Start serves the fake over HTTPS. Only requests with the bearer token are accepted.
@@ -84,6 +87,7 @@ func (s *Server) Reset() {
 		z.sets = map[string]*set{}
 	}
 	s.failWrites, s.failDelete = false, false
+	s.latency.Store(0)
 }
 
 // Seed puts a record into a set from outside the provider, as another writer would.
@@ -140,7 +144,14 @@ func apiError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})
 }
 
+// SetLatency delays every request, so that concurrent clients overlap between reading and
+// writing a record set.
+func (s *Server) SetLatency(d time.Duration) { s.latency.Store(int64(d)) }
+
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	if d := time.Duration(s.latency.Load()); d > 0 {
+		time.Sleep(d)
+	}
 	write := r.Method != http.MethodGet
 	s.Journal.Record(r.Method, r.URL.Path, write)
 	if r.Header.Get("Authorization") != "Bearer "+s.token {

@@ -3,11 +3,13 @@ package azuredns_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/azurednsfake"
@@ -86,7 +88,7 @@ func TestAddAndRemoveKeepForeignValues(t *testing.T) {
 	}
 }
 
-func TestAChangedEtagIsRetriedAtMostThreeTimes(t *testing.T) {
+func TestAChangedEtagIsRetriedAtMostTenTimes(t *testing.T) {
 	var puts atomic.Int32
 	var srv *azurednsfake.Server
 	conflict := func() {
@@ -97,6 +99,7 @@ func TestAChangedEtagIsRetriedAtMostThreeTimes(t *testing.T) {
 	var c *azuredns.Client
 	var store *dnsstore.Store
 	srv, store, c, _ = start(t, conflict)
+	c.SetRetryBase(time.Millisecond)
 	ctx := context.Background()
 	srv.Seed(sub, "dns", "example.net", "_acme-challenge", "first")
 
@@ -104,11 +107,62 @@ func TestAChangedEtagIsRetriedAtMostThreeTimes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "changed too often") {
 		t.Fatalf("want an error after repeated conflicts, got %v", err)
 	}
-	if n := puts.Load(); n != 3 {
-		t.Errorf("%d attempts, want 3", n)
+	if n := puts.Load(); n != 10 {
+		t.Errorf("%d attempts, want 10", n)
 	}
 	if got := store.Values("_acme-challenge.example.net"); slices.Contains(got, "ours") {
 		t.Errorf("a write went through despite the conflict: %v", got)
+	}
+}
+
+// Several orders for names that share a challenge record name write one record set at
+// once; four lost races in a row are survived.
+func TestFourConflictsInARowAreSurvived(t *testing.T) {
+	var puts atomic.Int32
+	var srv *azurednsfake.Server
+	conflict := func() {
+		if puts.Add(1) <= 4 {
+			srv.Seed(sub, "dns", "example.net", "_acme-challenge", fmt.Sprintf("concurrent-%d", puts.Load()))
+		}
+	}
+	var c *azuredns.Client
+	var store *dnsstore.Store
+	srv, store, c, _ = start(t, conflict)
+	c.SetRetryBase(time.Millisecond)
+	ctx := context.Background()
+
+	if err := c.Add(ctx, sub, "dns", "example.net", "_acme-challenge", []string{"ours"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := puts.Load(); n != 5 {
+		t.Errorf("%d writes, want 4 conflicts and one success", n)
+	}
+	got := store.Values("_acme-challenge.example.net")
+	for _, want := range []string{"ours", "concurrent-1", "concurrent-2", "concurrent-3", "concurrent-4"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("%q is missing from %v", want, got)
+		}
+	}
+	// Removing is guarded in the same way.
+	if err := c.Remove(ctx, sub, "dns", "example.net", "_acme-challenge", []string{"ours"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Values("_acme-challenge.example.net"); slices.Contains(got, "ours") {
+		t.Errorf("our value is still there: %v", got)
+	}
+}
+
+func TestContextEndsTheWaitBetweenAttempts(t *testing.T) {
+	var srv *azurednsfake.Server
+	var c *azuredns.Client
+	srv, _, c, _ = start(t, func() { srv.Seed(sub, "dns", "example.net", "_acme-challenge", "concurrent") })
+	c.SetRetryBase(time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	srv.Seed(sub, "dns", "example.net", "_acme-challenge", "first")
+	start := time.Now()
+	if err := c.Add(ctx, sub, "dns", "example.net", "_acme-challenge", []string{"ours"}); err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("the wait was not cut short: %v after %s", err, time.Since(start))
 	}
 }
 

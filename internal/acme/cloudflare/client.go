@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 
@@ -25,7 +26,16 @@ const maxResponse = 4 << 20
 type Error struct {
 	Status   int
 	Messages []string
+	// Codes are the Cloudflare error codes of the answer.
+	Codes []int
 }
+
+// codeIdenticalRecord is the code of the answer to creating a record that already
+// exists with the same type, name and content.
+const codeIdenticalRecord = 81058
+
+// HasCode reports whether the answer carried the error code.
+func (e *Error) HasCode(code int) bool { return slices.Contains(e.Codes, code) }
 
 func (e *Error) Error() string {
 	if len(e.Messages) == 0 {
@@ -101,6 +111,7 @@ func (c *Client) do(ctx context.Context, method, path, template string, body any
 		e := &Error{Status: resp.StatusCode}
 		for _, x := range env.Errors {
 			e.Messages = append(e.Messages, fmt.Sprintf("%d %s", x.Code, x.Message))
+			e.Codes = append(e.Codes, x.Code)
 		}
 		return nil, e
 	}
@@ -148,6 +159,32 @@ func (c *Client) CreateTXT(ctx context.Context, zoneID, fqdn, value string) (str
 	return rec.ID, nil
 }
 
+// FindTXT returns the IDs of the TXT records with exactly this name and content.
+func (c *Client) FindTXT(ctx context.Context, zoneID, fqdn, value string) ([]string, error) {
+	q := url.Values{"type": {"TXT"}, "name": {fqdn}, "content": {value}}
+	res, err := c.do(ctx, "GET", "/zones/"+url.PathEscape(zoneID)+"/dns_records?"+q.Encode(), "/zones/{zone}/dns_records", nil)
+	if err != nil {
+		return nil, err
+	}
+	var recs []struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(res, &recs); err != nil {
+		return nil, fmt.Errorf("cannot understand the Cloudflare answer: %w", err)
+	}
+	var ids []string
+	for _, r := range recs {
+		// The content of a TXT record may come back in quotes.
+		if r.Type == "TXT" && strings.EqualFold(r.Name, fqdn) && strings.Trim(r.Content, `"`) == value {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
+}
+
 // DeleteRecord deletes a record by ID; a record that is already gone counts as removed.
 func (c *Client) DeleteRecord(ctx context.Context, zoneID, id string) error {
 	_, err := c.do(ctx, "DELETE", "/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(id), "/zones/{zone}/dns_records/{id}", nil)
@@ -164,14 +201,18 @@ type ZonePublisher struct {
 	client *Client
 	zone   string
 
-	mu      sync.Mutex
-	zoneID  string
-	created map[string]string // fqdn + "\x00" + value -> record ID
+	mu     sync.Mutex
+	zoneID string
+	// created maps fqdn + "\x00" + value to the ID of a record this publisher created.
+	created map[string]string
+	// uncertain holds the records whose creation failed in a way that does not say
+	// whether Cloudflare stored them (a timeout or a server error after the commit).
+	uncertain map[string]bool
 }
 
 // NewZonePublisher returns a publisher for one zone.
 func NewZonePublisher(c *Client, zone string) *ZonePublisher {
-	return &ZonePublisher{client: c, zone: zone, created: map[string]string{}}
+	return &ZonePublisher{client: c, zone: zone, created: map[string]string{}, uncertain: map[string]bool{}}
 }
 
 // Zone returns the zone name.
@@ -197,25 +238,63 @@ func (p *ZonePublisher) lookup(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// Publish creates one TXT record per value.
+// writeHint is added to a 403 on a write: the token can read the zone but not change it.
+const writeHint = "the token needs DNS Edit permission on the zone; a read-only token can plan but not apply"
+
+// unknownOutcome reports whether a failed create may still have been committed: the
+// request never got a complete answer, or the server failed.
+func unknownOutcome(err error) bool {
+	var ce *Error
+	if errors.As(err, &ce) {
+		return ce.Status >= 500
+	}
+	return true
+}
+
+// Publish creates one TXT record per value. A record with the same name and content that
+// already exists (another order for the same name published it) is used as it is: it is
+// not owned by this publisher and is never deleted by it.
 func (p *ZonePublisher) Publish(ctx context.Context, fqdn string, values []string) error {
 	zoneID, err := p.lookup(ctx)
 	if err != nil {
 		return err
 	}
 	for _, v := range values {
+		key := fqdn + "\x00" + v
 		id, err := p.client.CreateTXT(ctx, zoneID, fqdn, v)
-		if err != nil {
+		var ce *Error
+		switch {
+		case err == nil:
+			p.mu.Lock()
+			p.created[key] = id
+			p.mu.Unlock()
+		case errors.As(err, &ce) && ce.HasCode(codeIdenticalRecord):
+			ids, ferr := p.client.FindTXT(ctx, zoneID, fqdn, v)
+			if ferr != nil {
+				return fmt.Errorf("cannot create the record %s: an identical record exists but cannot be read: %w", fqdn, ferr)
+			}
+			if len(ids) == 0 {
+				return fmt.Errorf("cannot create the record %s: %w", fqdn, err)
+			}
+			tflog.Debug(ctx, "an identical challenge record already exists and is used as it is", map[string]any{"name": fqdn})
+		default:
+			if unknownOutcome(err) {
+				p.mu.Lock()
+				p.uncertain[key] = true
+				p.mu.Unlock()
+			}
+			if errors.As(err, &ce) && ce.Status == http.StatusForbidden {
+				return fmt.Errorf("cannot create the record %s: %w (%s)", fqdn, err, writeHint)
+			}
 			return fmt.Errorf("cannot create the record %s: %w", fqdn, err)
 		}
-		p.mu.Lock()
-		p.created[fqdn+"\x00"+v] = id
-		p.mu.Unlock()
 	}
 	return nil
 }
 
-// Remove deletes the records this publisher created for the values.
+// Remove deletes the records this publisher created for the values. For a value whose
+// creation had an unknown outcome there is no ID: the records with that name and
+// content are looked up and deleted.
 func (p *ZonePublisher) Remove(ctx context.Context, fqdn string, values []string) error {
 	p.mu.Lock()
 	zoneID := p.zoneID
@@ -225,17 +304,35 @@ func (p *ZonePublisher) Remove(ctx context.Context, fqdn string, values []string
 		key := fqdn + "\x00" + v
 		p.mu.Lock()
 		id, ok := p.created[key]
+		unsure := p.uncertain[key]
 		p.mu.Unlock()
-		if !ok {
+		var ids []string
+		switch {
+		case ok:
+			ids = []string{id}
+		case unsure:
+			found, err := p.client.FindTXT(ctx, zoneID, fqdn, v)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("cannot look for the record %s: %w", fqdn, err))
+				continue
+			}
+			ids = found
+		default:
 			continue
 		}
-		if err := p.client.DeleteRecord(ctx, zoneID, id); err != nil {
-			errs = append(errs, fmt.Errorf("cannot delete the record %s: %w", fqdn, err))
-			continue
+		failed := false
+		for _, rid := range ids {
+			if err := p.client.DeleteRecord(ctx, zoneID, rid); err != nil {
+				errs = append(errs, fmt.Errorf("cannot delete the record %s: %w", fqdn, err))
+				failed = true
+			}
 		}
-		p.mu.Lock()
-		delete(p.created, key)
-		p.mu.Unlock()
+		if !failed {
+			p.mu.Lock()
+			delete(p.created, key)
+			delete(p.uncertain, key)
+			p.mu.Unlock()
+		}
 	}
 	return errors.Join(errs...)
 }
