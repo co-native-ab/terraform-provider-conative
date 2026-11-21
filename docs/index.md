@@ -10,7 +10,8 @@ description: |-
 Manages resources that the major cloud providers do not cover, or do not cover well. The first area is Azure SQL Database: Microsoft Entra principals as contained database users, their role memberships and their permissions. The second is ACME: certificates from an ACME certificate authority such as Let's Encrypt, issued into Azure Key Vault with DNS-01 challenges in Azure DNS or Cloudflare.
 
 See the [Azure SQL guide](guides/azure-sql-entra-principals) for how the access token, user creation,
-import and retries work.
+import and retries work, and the [ACME guide](guides/acme-certificates-in-key-vault) for certificates issued
+into Azure Key Vault.
 
 ## Authentication
 
@@ -68,6 +69,59 @@ provider "conative" {
   azuresql = {
     server       = "reporting-server.database.windows.net"
     access_token = ephemeral.azidentity_default_credential.sql.access_token
+  }
+}
+```
+
+### ACME
+
+The `conative_acme_registration` and `conative_acme_certificate` resources take two access tokens in the
+`acme` settings, and neither is needed unless you use them:
+
+- `key_vault_access_token`, for `https://vault.azure.net/.default`. It signs the requests to the certificate
+  authority with the account key and creates, reads, merges and deletes certificates in Key Vault.
+- `resource_manager_access_token`, for `https://management.azure.com/.default`. It writes the challenge records
+  in Azure DNS, so it is needed only when a certificate has an `azure_dns` block.
+
+Both tokens are sensitive and are never stored or logged. Obtain them from the same `azidentity` provider, one
+ephemeral resource per scope. The Cloudflare API token of a certificate is not a provider setting: it is a
+write-only argument on the certificate itself. Using write-only arguments needs Terraform 1.11 or later.
+
+```terraform
+terraform {
+  # Ephemeral resources need Terraform 1.10 or later. The write-only Cloudflare API token
+  # of conative_acme_certificate needs 1.11 or later.
+  required_version = ">= 1.11.0"
+
+  required_providers {
+    azidentity = {
+      source  = "co-native-ab/azidentity"
+      version = "~> 0.1"
+    }
+    conative = {
+      source = "co-native-ab/conative"
+    }
+  }
+}
+
+provider "azidentity" {}
+
+# One token for Key Vault: it signs the requests to the certificate authority with the
+# account key and manages the certificate.
+ephemeral "azidentity_default_credential" "key_vault" {
+  scopes = ["https://vault.azure.net/.default"]
+}
+
+# One token for Azure Resource Manager: it writes the challenge records in Azure DNS.
+# Needed only when a certificate has an azure_dns block.
+ephemeral "azidentity_default_credential" "resource_manager" {
+  scopes = ["https://management.azure.com/.default"]
+}
+
+provider "conative" {
+  acme = {
+    key_vault_access_token        = ephemeral.azidentity_default_credential.key_vault.access_token
+    resource_manager_access_token = ephemeral.azidentity_default_credential.resource_manager.access_token
   }
 }
 ```

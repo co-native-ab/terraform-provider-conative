@@ -1,0 +1,64 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description | trimspace}}
+
+See the [ACME guide](../guides/acme-certificates-in-key-vault) for how issuance, renewal, failures and
+permissions work.
+
+{{ if .HasExample -}}
+## Example Usage
+
+{{tffile .ExampleFile}}
+{{- end }}
+
+{{.SchemaMarkdown | trimspace}}
+
+## Importing an existing certificate
+
+Any Key Vault certificate can be imported, including one issued by another certificate authority, created
+with another issuer, imported into Key Vault from a PFX file, or whose key is not exportable. Import only
+reads the certificate's current version; it never reads the private key, the secret or the certificate
+policy, and it changes nothing.
+
+- From the current version, import sets `version` and `issued_version` (both that version),
+  `certificate_pem`, `not_after`, `thumbprint`, `common_name` (the subject common name),
+  `subject_alternative_names` (the certificate's DNS names in lower case, without the common name) and
+  `key_type` (from the public key). `min_days_remaining` is set to `30`.
+- Key Vault cannot report `registration_id`, `revoke_on_destroy` or the DNS blocks. The first plan after
+  import therefore always shows one in-place update that only records them (and `min_days_remaining` if it
+  is not `30`, and `key_vault_url` if it is written differently, for example with a trailing `/`). Applying
+  it contacts neither the certificate authority nor Key Vault nor any DNS zone for a change. The plan after
+  that shows no changes.
+- If the certificate is within `min_days_remaining` days of expiry, or its names or key type differ from the
+  configuration, the first plan instead shows an update that orders a new certificate.
+- The issuer, policy, lifetime actions and key exportability of the imported certificate never cause an
+  order by themselves. The first order (renewal or a change of names or key type) adds a new version to the
+  same Key Vault certificate with a new key generated in Key Vault and replaces the certificate policy with
+  this resource's (issuer `Unknown`, exportable key, the configured key type and names, no automatic
+  actions). The versionless certificate and secret IDs stay the same, so services that use them pick up the
+  new version. Until then, Key Vault keeps acting on the old policy: a version it adds on its own triggers a
+  renewal at the next plan, and a pending request to another issuer makes the order fail until it is
+  cancelled.
+- Import fails, and nothing is stored, when the certificate has no issued version, has no subject common
+  name, has a common name that is not one of its DNS names, has a subject alternative name that is not a DNS
+  name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has a key other than
+  RSA 2048/3072/4096 or EC P-256/P-384/P-521.
+- A certificate imported and not yet renewed by this resource is not revoked on destroy, even with
+  `revoke_on_destroy = true`; destroy warns and deletes it from Key Vault.
+
+{{ if .HasImport -}}
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+{{codefile "shell" .ImportFile}}
+{{- end }}

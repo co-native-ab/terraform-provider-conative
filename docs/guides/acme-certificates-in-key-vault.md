@@ -1,0 +1,272 @@
+---
+page_title: "Issuing ACME certificates into Azure Key Vault"
+subcategory: ""
+description: |-
+  How the ACME resources create certificates in Key Vault with DNS-01 challenges, renew them, handle failures and import existing certificates.
+---
+
+# Issuing ACME certificates into Azure Key Vault
+
+This guide explains how `conative_acme_registration` and `conative_acme_certificate` behave, and why. The
+resources talk to any certificate authority that implements ACME (RFC 8555), such as Let's Encrypt, prove
+control of the names with DNS-01 challenges in Azure DNS or Cloudflare, and keep the issued certificate in
+Azure Key Vault.
+
+## What it does
+
+1. **The account key lives in Key Vault.** You create an RSA or EC key in Key Vault, for example with
+   `azurerm_key_vault_key`. `conative_acme_registration` uses it as the ACME account key. Every request to
+   the certificate authority is signed by Key Vault's sign operation, so the private key never leaves Key
+   Vault. Whether the key is exportable is your choice; the provider does not need it either way. If the
+   authority already has an account for the key, that account is used; otherwise one is created, which
+   agrees to the authority's terms of service.
+2. **The certificate's key is generated in Key Vault.** For an order, the provider asks Key Vault to create a
+   certificate with the issuer `Unknown`. Key Vault generates a new, exportable private key and a signing
+   request, and waits for a certificate. The provider passes the request to the certificate authority,
+   answers the DNS-01 challenges, finalizes the order with the signing request, and merges the issued chain
+   back into the same Key Vault certificate. The private key is never in Terraform state, in the plan or in
+   a log.
+3. **State holds only public values:** the certificate IDs, the current version, the certificate in PEM,
+   its expiry and its thumbprint.
+
+The resource owns the Key Vault certificate. You do not also declare it with `azurerm_key_vault_certificate`.
+
+## Supplying the tokens
+
+The provider contains no sign-in code. It takes two Microsoft Entra access tokens in the `acme` settings:
+
+- `key_vault_access_token` for `https://vault.azure.net/.default`
+- `resource_manager_access_token` for `https://management.azure.com/.default`, only needed when a certificate
+  uses `azure_dns`
+
+The recommended source is the [`co-native-ab/azidentity`](https://registry.terraform.io/providers/co-native-ab/azidentity)
+provider with one ephemeral resource per scope:
+
+```terraform
+terraform {
+  # Ephemeral resources need Terraform 1.10 or later. The write-only Cloudflare API token
+  # of conative_acme_certificate needs 1.11 or later.
+  required_version = ">= 1.11.0"
+
+  required_providers {
+    azidentity = {
+      source  = "co-native-ab/azidentity"
+      version = "~> 0.1"
+    }
+    conative = {
+      source = "co-native-ab/conative"
+    }
+  }
+}
+
+provider "azidentity" {}
+
+# One token for Key Vault: it signs the requests to the certificate authority with the
+# account key and manages the certificate.
+ephemeral "azidentity_default_credential" "key_vault" {
+  scopes = ["https://vault.azure.net/.default"]
+}
+
+# One token for Azure Resource Manager: it writes the challenge records in Azure DNS.
+# Needed only when a certificate has an azure_dns block.
+ephemeral "azidentity_default_credential" "resource_manager" {
+  scopes = ["https://management.azure.com/.default"]
+}
+
+provider "conative" {
+  acme = {
+    key_vault_access_token        = ephemeral.azidentity_default_credential.key_vault.access_token
+    resource_manager_access_token = ephemeral.azidentity_default_credential.resource_manager.access_token
+  }
+}
+```
+
+The `acme` settings are required only when an ACME resource is used. A configuration that uses only other
+resources of this provider needs no `acme` block.
+
+## A registration and a certificate
+
+The following creates an account, and one certificate with a wildcard and the apex name answered through
+Cloudflare and another wildcard answered through Azure DNS, all in one order:
+
+```terraform
+resource "azurerm_key_vault_key" "acme_account" {
+  name         = "acme-account"
+  key_vault_id = azurerm_key_vault.example.id
+  key_type     = "EC"
+  curve        = "P-256"
+  key_opts     = ["sign", "verify"]
+}
+
+resource "conative_acme_registration" "letsencrypt" {
+  server_url     = "https://acme-v02.api.letsencrypt.org/directory"
+  account_key_id = azurerm_key_vault_key.acme_account.id
+  email          = "certificates@example.com"
+}
+
+ephemeral "azurerm_key_vault_secret" "cloudflare_token" {
+  name         = "cloudflare-dns-token"
+  key_vault_id = azurerm_key_vault.example.id
+}
+
+resource "conative_acme_certificate" "example" {
+  registration_id  = conative_acme_registration.letsencrypt.id
+  key_vault_url    = azurerm_key_vault.example.vault_uri
+  certificate_name = "example-com"
+
+  common_name = "example.com"
+  subject_alternative_names = [
+    "*.example.com",
+    "*.apps.example.net",
+  ]
+
+  key_type           = "RSA4096"
+  min_days_remaining = 30
+  revoke_on_destroy  = true
+
+  cloudflare {
+    zone          = "example.com"
+    match_domains = ["example.com"]
+    api_token     = ephemeral.azurerm_key_vault_secret.cloudflare_token.value
+  }
+
+  azure_dns {
+    subscription_id = "00000000-0000-0000-0000-000000000000"
+    resource_group  = "dns"
+    zone_name       = "example.net"
+    match_domains   = ["apps.example.net"]
+  }
+}
+```
+
+### The Cloudflare token
+
+`cloudflare.api_token` is a write-only argument. Terraform passes it to the provider for the run and never
+stores it in the plan or the state, so it needs Terraform 1.11 or later. Feed it from an ephemeral value, as
+above from an ephemeral `azurerm_key_vault_secret`, or from an ephemeral variable. The provider uses the token
+to write and remove the challenge records and, during a plan, only for read-only checks.
+
+### Which DNS zone answers which name
+
+Every name of the certificate (the common name and each subject alternative name) must be answered by exactly
+one `azure_dns` or `cloudflare` block. A name belongs to a block when it equals one of the block's
+`match_domains` entries or ends in `.` followed by an entry; a leading `*.` is ignored. If entries of several
+blocks match, the longest entry wins. In the example, `example.com` and `*.example.com` go to Cloudflare, and
+`*.apps.example.net` goes to Azure DNS. A name that no block covers is rejected at plan time.
+
+Challenge records are removed again after validation, also when the order fails.
+
+## Renewal and consumers
+
+Set `min_days_remaining` (default `30`). When the current time passes the expiry minus that many days, the
+plan shows an **in-place update**. Applying it runs a new order and adds a **new version** to the same Key
+Vault certificate, with a new key generated in Key Vault. A new version is also planned when the current
+version in Key Vault was changed outside Terraform.
+
+Services that reference the versionless identifiers pick up the new version without any change of their own:
+
+- `id`: `https://<vault>/certificates/<name>`
+- `secret_id`: `https://<vault>/secrets/<name>`, the form that services such as Azure Front Door and Azure
+  Container Apps use to load a certificate
+
+Do not use the versioned form (`version`) for consumers that should follow renewals.
+
+Renewal needs a plan and apply to happen, for example in a scheduled pipeline run; the provider has no
+background process.
+
+## A plan never writes
+
+Plan and refresh only read: they read the Key Vault certificate and, where needed, the authority's account.
+They create no order, write no DNS record and change nothing in Key Vault. All writes happen in apply.
+
+## Failures and retries
+
+An apply that fails part way leaves nothing half-done:
+
+- The challenge records the apply wrote are removed again, and the pending request in Key Vault is cancelled.
+  If the removal of a record fails, the error names the records that remain.
+- A failed create does not save the resource, and a failed update leaves the state unchanged, so running
+  apply again is the retry.
+- A certificate that has been issued by the authority but whose merge into Key Vault failed is not revoked;
+  its key is gone with the cancelled request, and the next apply orders a new one.
+- Before ordering, the provider cancels a pending request with the issuer `Unknown` left by an earlier
+  failed run. A pending request for another issuer makes the order fail until you cancel it in Key Vault.
+
+The provider waits, for at most two minutes, until the challenge records are visible on the zone's
+authoritative name servers before it asks the authority to validate. Apply fails with a clear error if they
+do not appear in time.
+
+Authorization errors are errors: if a token lacks a permission, the apply fails and says which service
+refused.
+
+## Destroying
+
+With `revoke_on_destroy = true`, destroy first revokes the current certificate at the authority with the
+account key of the registration, and then deletes the certificate from Key Vault. With `false`, it only
+deletes. A certificate that has already expired or is already gone is not revoked. If revocation fails, destroy
+fails before anything is deleted.
+
+Key Vault soft-deletes the certificate: its name stays reserved until it is purged or the soft-delete
+retention period has passed, and creating a certificate with that name fails in the meantime. Recover or
+purge the deleted certificate first. Destroying `conative_acme_registration` removes it from state only; the
+account stays registered with the authority.
+
+## Permissions
+
+The identities behind the two tokens need the permissions below. The provider neither checks nor grants them.
+
+Azure Key Vault (access policies or the equivalent role assignments, for example *Key Vault Crypto User* on
+the account key and *Key Vault Certificates Officer* on the vault):
+
+- Keys: `get`, `sign` on the account key. The certificate's own key needs no key permission.
+- Certificates: `get`, `list`, `create`, `update`, `import` (needed to merge the issued chain) and `delete`.
+
+Azure DNS (for each `azure_dns` block): read the zone and write and delete TXT record sets on the zone, for example
+with the built-in *DNS Zone Contributor* role or a custom role limited to TXT records. The token for `https://management.azure.com/.default` is used.
+Only the Azure public cloud is supported.
+
+Cloudflare (for each `cloudflare` block): an API token with *Zone: Zone: Read* and *Zone: DNS: Edit* on the
+zone.
+
+## Importing an existing certificate
+
+A registration is imported with `<server_url>|<account_key_id>`, quoted because of the pipe. A certificate is
+imported with its versionless Key Vault ID:
+
+```shell
+terraform import conative_acme_certificate.example https://example.vault.azure.net/certificates/example-com
+```
+
+Any Key Vault certificate can be imported, including one issued by another authority or imported from a PFX
+file. Import reads only the current version and changes nothing.
+
+1. Import records the names, key type, expiry and thumbprint from the certificate itself, and sets
+   `min_days_remaining` to `30`.
+2. Key Vault cannot report the registration, `revoke_on_destroy` or the DNS blocks, so the first plan shows
+   **one in-place update** that only records them. Applying it contacts neither the authority, nor Key Vault,
+   nor any DNS zone for a change.
+3. The plan after that is empty, until the certificate is within `min_days_remaining` days of expiry or you
+   change the names or the key type.
+4. The first order replaces the certificate policy with the resource's own (issuer `Unknown`, exportable key,
+   your key type and names, no automatic actions) and adds a new version with a key generated in Key Vault.
+   The versionless IDs stay the same.
+5. A certificate that was imported and not yet renewed by this resource is never revoked on destroy: it was
+   not issued by this resource.
+
+See "Importing an existing certificate" on the [certificate resource page](../resources/acme_certificate)
+for the exact rules, including the certificates that cannot be imported.
+
+## Let's Encrypt notes
+
+- Use the staging directory `https://acme-staging-v02.api.letsencrypt.org/directory` while you try a
+  configuration; the production directory has rate limits.
+- Let's Encrypt does not accept the `P521` key type.
+- Wildcard names need DNS-01, which is the only challenge this provider supports.
+
+## Limitations
+
+- Only DNS-01 validation, through Azure DNS (public cloud) and Cloudflare.
+- No account deactivation, key rollover or external account binding.
+- The certificate's key is always generated in Key Vault, exportable, and new for every version; an existing
+  key cannot be reused.
+- Certificate profiles and preferred chains are not supported.

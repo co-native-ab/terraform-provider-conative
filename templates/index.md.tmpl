@@ -10,7 +10,8 @@ description: |-
 {{.Description | trimspace}}
 
 See the [Azure SQL guide](guides/azure-sql-entra-principals) for how the access token, user creation,
-import and retries work.
+import and retries work, and the [ACME guide](guides/acme-certificates-in-key-vault) for certificates issued
+into Azure Key Vault.
 
 ## Authentication
 
@@ -29,6 +30,22 @@ failure to obtain the token stops the run where it happens.
 ## Example Usage
 
 {{tffile "examples/provider/provider.tf"}}
+
+### ACME
+
+The `conative_acme_registration` and `conative_acme_certificate` resources take two access tokens in the
+`acme` settings, and neither is needed unless you use them:
+
+- `key_vault_access_token`, for `https://vault.azure.net/.default`. It signs the requests to the certificate
+  authority with the account key and creates, reads, merges and deletes certificates in Key Vault.
+- `resource_manager_access_token`, for `https://management.azure.com/.default`. It writes the challenge records
+  in Azure DNS, so it is needed only when a certificate has an `azure_dns` block.
+
+Both tokens are sensitive and are never stored or logged. Obtain them from the same `azidentity` provider, one
+ephemeral resource per scope. The Cloudflare API token of a certificate is not a provider setting: it is a
+write-only argument on the certificate itself. Using write-only arguments needs Terraform 1.11 or later.
+
+{{tffile "examples/provider/provider_acme.tf"}}
 
 ### Supplying the token from a variable
 
