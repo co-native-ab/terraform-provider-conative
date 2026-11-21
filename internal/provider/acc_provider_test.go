@@ -67,7 +67,9 @@ func readDataSourceDiagnostics(t *testing.T, server, token, typeName string, cfg
 	str := tftypes.String
 	settingsType := tftypes.Object{AttributeTypes: map[string]tftypes.Type{"server": str, "access_token": str, "retry_timeout": str}}
 	providerType := schemas.Provider.ValueType()
+	acmeType := providerType.(tftypes.Object).AttributeTypes["acme"]
 	providerCfg, err := tfprotov6.NewDynamicValue(providerType, tftypes.NewValue(providerType, map[string]tftypes.Value{
+		"acme": tftypes.NewValue(acmeType, nil),
 		"azuresql": tftypes.NewValue(settingsType, map[string]tftypes.Value{
 			"server":        tftypes.NewValue(str, server),
 			"access_token":  tftypes.NewValue(str, token),
