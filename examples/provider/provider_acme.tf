@@ -23,7 +23,8 @@ ephemeral "azidentity_default_credential" "key_vault" {
 }
 
 # One token for Azure Resource Manager: it writes the challenge records in Azure DNS.
-# Needed only when a certificate has an azure_dns block.
+# Needed only when an order runs for names that an azure_dns block serves; plans in which
+# nothing is ordered do not need it.
 ephemeral "azidentity_default_credential" "resource_manager" {
   scopes = ["https://management.azure.com/.default"]
 }

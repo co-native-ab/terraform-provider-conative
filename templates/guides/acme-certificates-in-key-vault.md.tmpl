@@ -36,8 +36,8 @@ The resource owns the Key Vault certificate. You do not also declare it with `az
 The provider contains no sign-in code. It takes two Microsoft Entra access tokens in the `acme` settings:
 
 - `key_vault_access_token` for `https://vault.azure.net/.default`
-- `resource_manager_access_token` for `https://management.azure.com/.default`, only needed when a certificate
-  uses `azure_dns`
+- `resource_manager_access_token` for `https://management.azure.com/.default`, optional: needed only when an
+  order runs for names that an `azure_dns` block serves
 
 The recommended source is the [`co-native-ab/azidentity`](https://registry.terraform.io/providers/co-native-ab/azidentity)
 provider with one ephemeral resource per scope:
@@ -105,9 +105,57 @@ resource "conative_acme_certificate" "example" {
 ### The Cloudflare token
 
 `cloudflare.api_token` is a write-only argument. Terraform passes it to the provider for the run and never
-stores it in the plan or the state, so it needs Terraform 1.11 or later. Feed it from an ephemeral value, as
-above from an ephemeral `azurerm_key_vault_secret`, or from an ephemeral variable. The provider uses the token
-to write and remove the challenge records and, during a plan, only for read-only checks.
+stores it in the plan or the state, so it needs Terraform 1.11 or later, and using a different token in
+another run causes no difference in the plan. Feed it from an ephemeral value, as above from an ephemeral
+`azurerm_key_vault_secret`, or from an ephemeral variable.
+
+The attribute is optional because it is needed only when an order actually runs:
+
+- A plan or refresh in which no order is due succeeds with the token unset (null). Nothing in such a run
+  calls Cloudflare.
+- When an order is planned (a new certificate, a renewal, a change of names, key type or certificate
+  authority, or a version added outside Terraform) and a block that serves a name of the order has no token,
+  the plan fails with an error that names the block and `api_token`. If the token is not known until apply,
+  the same check runs again at apply.
+- During a plan the provider uses the token only to look up the zone, which is a read. A token that can read
+  but not edit therefore works for plans, including a plan that shows a renewal.
+
+The same applies to `acme.resource_manager_access_token` and `azure_dns` blocks: without the token, plans in
+which nothing is ordered succeed, and a planned order fails with an error that names the setting and the
+block.
+
+### Read-only tokens for plans, write tokens for apply
+
+You can run plans with credentials that cannot change anything and keep the write credentials for apply
+runs. For Cloudflare, pass a read-only token (*Zone: Zone: Read* and *Zone: DNS: Read*) as `api_token` in
+plan runs and the token that can edit DNS in apply runs. Because `api_token` is write-only, switching tokens
+between the plan and the apply causes no diff. For example, keep both tokens as ephemeral secrets (or as
+ephemeral variables supplied by the pipeline) and select one per run:
+
+```terraform
+variable "dns_write" {
+  type    = bool
+  default = false # true only in apply runs
+}
+
+ephemeral "azurerm_key_vault_secret" "cloudflare_read" {
+  name         = "cloudflare-dns-read-token"
+  key_vault_id = azurerm_key_vault.example.id
+}
+
+ephemeral "azurerm_key_vault_secret" "cloudflare_write" {
+  name         = "cloudflare-dns-token"
+  key_vault_id = azurerm_key_vault.example.id
+}
+
+# In the certificate's cloudflare block:
+#   api_token = var.dns_write ? ephemeral.azurerm_key_vault_secret.cloudflare_write.value : ephemeral.azurerm_key_vault_secret.cloudflare_read.value
+```
+
+The same works for the Azure side (use identities with read-only and with write rights to produce the two
+tokens) and for Key Vault, see [Permissions](#permissions). If an apply runs with a token that cannot write,
+it fails at the first write with an error naming the block and zone, removes anything it created, and leaves
+the state unchanged.
 
 ### Which DNS zone answers which name
 
@@ -134,13 +182,57 @@ Services that reference the versionless identifiers pick up the new version with
 
 Do not use the versioned form (`version`) for consumers that should follow renewals.
 
+### Forcing a renewal
+
+- Set `min_days_remaining` higher than the days the certificate has left. The next plan shows an in-place
+  update that orders a new version. The new certificate may again be inside the window, in which case every
+  plan orders again, so set the value back afterwards.
+- Change `common_name`, `subject_alternative_names` or `key_type`: a different set of names or another key
+  type orders a new version in place.
+- Change `registration_id` to a registration at another certificate authority URL.
+- `terraform apply -replace=conative_acme_certificate.example` destroys and creates the resource. The destroy
+  revokes the certificate when `revoke_on_destroy` is `true` and soft-deletes the Key Vault certificate, and
+  creating a certificate under a soft-deleted name fails until it is purged or recovered (see
+  [Destroying](#destroying)). Prefer the in-place ways above unless you want a new Key Vault certificate.
+
 Renewal needs a plan and apply to happen, for example in a scheduled pipeline run; the provider has no
 background process.
 
 ## A plan never writes
 
-Plan and refresh only read: they read the Key Vault certificate and, where needed, the authority's account.
-They create no order, write no DNS record and change nothing in Key Vault. All writes happen in apply.
+Plan and refresh only read, and they need only read rights:
+
+- `conative_acme_registration` keeps the account URL from state. Refresh makes **no signed request** to the
+  certificate authority and no Key Vault sign call; it reads the key's metadata from Key Vault to confirm that
+  the key still exists. Only a Key Vault answer of "not found" for the key removes the registration from the
+  state; any other failure is an error and the state is kept.
+- `conative_acme_certificate` refresh, import and plan read the certificate's public data from Key Vault
+  (the certificate, its versions and a pending operation). They never read a secret, never sign, never call
+  the certificate authority, and never write to Key Vault, DNS or the authority.
+- A plan in which nothing is ordered needs neither the Cloudflare token nor the Resource Manager token.
+
+Importing a registration is an explicit action that looks up the account and therefore signs once. Creating
+a registration, changing its `email`, ordering, renewing and destroying a certificate sign and write; they
+happen in apply.
+
+## Authority changes
+
+`registration_id` of a certificate normally refers to the registration you already use. When it changes from
+a registration at one certificate authority URL to a registration at a different `server_url` (for example
+from a staging directory to the production directory), the plan shows an in-place update that orders a new
+certificate, because a certificate from one authority is not valid for the other. Changing it to another
+account at the same `server_url`, or setting it for the first time after an import, only updates the state
+and orders nothing.
+
+## Some authorities do not report or keep what you send
+
+- Some authorities, Let's Encrypt among them, do not store or report an account's contact address. The
+  provider therefore never reads `email` back: Terraform keeps the configured value, an unchanged `email`
+  causes no request, and only a change of `email` sends an update.
+- Some authorities leave the common name out of the certificate they issue (Let's Encrypt does for names of
+  65 characters or more, and some profiles never include one). `common_name` can be at most 64 characters.
+  When the issued certificate has no common name but contains the configured one among its DNS names, the
+  provider keeps the configured common name and the plan stays empty.
 
 ## Failures and retries
 
@@ -164,10 +256,20 @@ refused.
 
 ## Destroying
 
-With `revoke_on_destroy = true`, destroy first revokes the current certificate at the authority with the
-account key of the registration, and then deletes the certificate from Key Vault. With `false`, it only
-deletes. A certificate that has already expired or is already gone is not revoked. If revocation fails, destroy
-fails before anything is deleted.
+With `revoke_on_destroy = true`, destroy first revokes the certificate at the authority with the account key
+of the registration, and then deletes the certificate from Key Vault. With `false`, it only deletes.
+
+Exactly which certificate is revoked: the version this resource **issued last** (`issued_version`), which is
+not necessarily the current version in Key Vault, for example when another version was added outside
+Terraform. Revocation is skipped (and destroy continues with the deletion) when
+
+- that version has expired or no longer exists in Key Vault,
+- the authority reports that the certificate is already revoked, which counts as revoked, or
+- the certificate was imported and this resource has not renewed it since, because it was issued elsewhere;
+  destroy then warns.
+
+Revoking signs a request with the account key, so the identity behind the Key Vault token needs the sign
+permission at destroy. If revocation fails, destroy fails before anything is deleted.
 
 Key Vault soft-deletes the certificate: its name stays reserved until it is purged or the soft-delete
 retention period has passed, and creating a certificate with that name fails in the meantime. Recover or
@@ -176,25 +278,55 @@ account stays registered with the authority.
 
 ## Permissions
 
-The identities behind the two tokens need the permissions below. The provider neither checks nor grants them.
+The identities behind the tokens need the permissions below. The provider neither checks nor grants them, and
+it never reads a secret: no operation needs a secrets permission. The built-in roles named are examples; any
+role or access policy that grants the data actions will do. Check the current role definitions in the Azure
+documentation.
 
-Azure Key Vault (access policies or the equivalent role assignments, for example *Key Vault Crypto User* on
-the account key and *Key Vault Certificates Officer* on the vault):
+Key Vault data actions (Azure RBAC) for each operation:
 
-- Keys: `get`, `sign` on the account key. The certificate's own key needs no key permission.
-- Certificates: `get`, `list`, `create`, `update`, `import` (needed to merge the issued chain) and `delete`.
+| Operation | Key Vault data actions | Other services |
+| --- | --- | --- |
+| Refresh and plan of a registration | `Microsoft.KeyVault/vaults/keys/read` on the account key | none |
+| Refresh, import and plan of a certificate | `Microsoft.KeyVault/vaults/certificates/read` (get, list versions, read a pending operation) | none |
+| Create a registration, change its `email`, import a registration | `keys/read` and `Microsoft.KeyVault/vaults/keys/sign/action` on the account key | the certificate authority |
+| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version and merging the issued chain), `certificates/delete` (cancelling a leftover or failed pending operation), and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
+| Destroy with `revoke_on_destroy = true` | `certificates/read`, `certificates/delete`, `keys/sign/action` | the certificate authority |
+| Destroy with `revoke_on_destroy = false` | `certificates/delete` | none |
 
-Azure DNS (for each `azure_dns` block): read the zone and write and delete TXT record sets on the zone, for example
-with the built-in *DNS Zone Contributor* role or a custom role limited to TXT records. The token for `https://management.azure.com/.default` is used.
-Only the Azure public cloud is supported.
+For example, *Key Vault Reader* (metadata only), or *Key Vault Certificates Officer* for the certificate data
+actions and *Key Vault Crypto User* for `keys/read` and `keys/sign/action`. Rights for refresh and plan are a
+strict subset of those for apply, so a pipeline can run plans with a read-only identity and applies with a
+writing one. The merge needs only the certificate create and update rights; it does not need the `import`
+data action. The certificate's own key needs no key permission. With access policies instead of RBAC, the
+equivalent are the certificate permissions `get`, `list`, `create`, `update` and `delete`, and the key
+permissions `get` and `sign`.
 
-Cloudflare (for each `cloudflare` block): an API token with *Zone: Zone: Read* and *Zone: DNS: Edit* on the
-zone.
+Azure DNS: for each `azure_dns` block, read the zone and read, write and delete TXT record sets, for example
+with the built-in *DNS Zone Contributor* role (broader than needed) or a custom role limited to the actions
+above. Needed only when an order runs. The token for `https://management.azure.com/.default` is used. Only the
+Azure public cloud is supported.
+
+Cloudflare: for each `cloudflare` block an API token with *Zone: Zone: Read* and *Zone: DNS: Edit* on the
+zone for orders. A plan only reads the zone, so a token with read rights suffices there.
+
+## Account key types
+
+The account key of a registration can be RSA with 2048 bits or more (Key Vault offers 2048, 3072 and 4096)
+or EC on P-256, P-384 or P-521; the provider signs with RS256, ES256, ES384 and ES512 respectively. The key
+must permit the `sign` operation. It does not matter whether the key is exportable or not. Some authorities
+accept fewer key types: Let's Encrypt, for example, does not accept P-521 account keys. EC curves other than
+those named (for example P-256K) and RSA keys below 2048 bits are refused.
 
 ## Importing an existing certificate
 
-A registration is imported with `<server_url>|<account_key_id>`, quoted because of the pipe. A certificate is
-imported with its versionless Key Vault ID:
+Import IDs:
+
+- `conative_acme_registration`: `<server_url>|<account_key_id>`, quoted because of the pipe, for example
+  `'https://acme-v02.api.letsencrypt.org/directory|https://example.vault.azure.net/keys/acme-account/0123456789abcdef'`.
+  Importing looks up the account for the key at the authority, which signs a request. The email is not read
+  back (many authorities do not report it); an `email` in the configuration is set by the first apply.
+- `conative_acme_certificate`: the versionless Key Vault ID, `https://<vault>.vault.azure.net/certificates/<name>`.
 
 ```shell
 terraform import conative_acme_certificate.example https://example.vault.azure.net/certificates/example-com
@@ -212,7 +344,10 @@ file. Import reads only the current version and changes nothing.
    change the names or the key type.
 4. The first order replaces the certificate policy with the resource's own (issuer `Unknown`, exportable key,
    your key type and names, no automatic actions) and adds a new version with a key generated in Key Vault.
-   The versionless IDs stay the same.
+   The versionless IDs stay the same. The policy's content type becomes `application/x-pkcs12`: a
+   certificate that was imported with a PEM secret becomes a PKCS #12 secret from the first order on, which
+   consumers that read the secret must be able to handle. Services such as Azure Front Door and Azure
+   Container Apps do.
 5. A certificate that was imported and not yet renewed by this resource is never revoked on destroy: it was
    not issued by this resource.
 
@@ -223,7 +358,8 @@ for the exact rules, including the certificates that cannot be imported.
 
 - Use the staging directory `https://acme-staging-v02.api.letsencrypt.org/directory` while you try a
   configuration; the production directory has rate limits.
-- Let's Encrypt does not accept the `P521` key type.
+- Let's Encrypt does not accept the `P521` key type for certificates or for account keys, and does not report
+  an account's contact address or include a long common name in a certificate.
 - Wildcard names need DNS-01, which is the only challenge this provider supports.
 
 ## Limitations

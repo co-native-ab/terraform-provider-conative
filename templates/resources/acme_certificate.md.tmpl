@@ -50,13 +50,23 @@ policy, and it changes nothing.
   name, has a common name that is not one of its DNS names, has a subject alternative name that is not a DNS
   name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has a key other than
   RSA 2048/3072/4096 or EC P-256/P-384/P-521.
+- The first order replaces the certificate policy including its content type, which becomes
+  `application/x-pkcs12`. A certificate that was imported with a PEM secret becomes a PKCS #12 secret from then
+  on; consumers that read the secret must be able to handle that.
 - A certificate imported and not yet renewed by this resource is not revoked on destroy, even with
   `revoke_on_destroy = true`; destroy warns and deletes it from Key Vault.
+
+## Permissions
+
+See [Permissions](../guides/acme-certificates-in-key-vault#permissions) in the guide for the minimum
+Azure RBAC data actions per operation: refresh, import and plan need only `certificates/read`; ordering,
+renewing and destroying need more, and nothing ever reads a secret. The guide also explains how to force a
+renewal and exactly what `revoke_on_destroy` revokes.
 
 {{ if .HasImport -}}
 ## Import
 
-Import is supported using the following syntax:
+Import is supported using the versionless Key Vault certificate ID, `https://<vault>.vault.azure.net/certificates/<name>`:
 
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 

@@ -113,7 +113,8 @@ ephemeral "azidentity_default_credential" "key_vault" {
 }
 
 # One token for Azure Resource Manager: it writes the challenge records in Azure DNS.
-# Needed only when a certificate has an azure_dns block.
+# Needed only when an order runs for names that an azure_dns block serves; plans in which
+# nothing is ordered do not need it.
 ephemeral "azidentity_default_credential" "resource_manager" {
   scopes = ["https://management.azure.com/.default"]
 }
@@ -179,7 +180,7 @@ Required:
 
 Optional:
 
-- `resource_manager_access_token` (String, Sensitive) A Microsoft Entra access token for `https://management.azure.com/.default`, used to write DNS-01 challenge records in Azure DNS. Required when a certificate has an `azure_dns` block.
+- `resource_manager_access_token` (String, Sensitive) A Microsoft Entra access token for `https://management.azure.com/.default`, used to write DNS-01 challenge records in Azure DNS. Optional: it is needed only when an order runs (a new certificate or a renewal) for names served by an `azure_dns` block. Refreshing and planning, and plans in which nothing is ordered, do not need it. When an order is planned and the token is missing, the plan fails and names the block.
 
 
 <a id="nestedatt--azuresql"></a>

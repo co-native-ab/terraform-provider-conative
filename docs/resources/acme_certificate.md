@@ -2,12 +2,12 @@
 page_title: "conative_acme_certificate Resource - conative"
 subcategory: ""
 description: |-
-    A certificate in Azure Key Vault issued by an ACME certificate authority through DNS-01 challenges. Key Vault generates the private key (exportable, a new key for every version) and the signing request; the provider only passes the signing request to the authority and merges the issued certificate back. Neither the private key nor any password is ever in Terraform state. Renewal adds a new version to the same Key Vault certificate, so services that reference the versionless ID pick it up.
+    A certificate in Azure Key Vault issued by an ACME certificate authority through DNS-01 challenges. Key Vault generates the private key (exportable, a new key for every version) and the signing request; the provider only passes the signing request to the authority and merges the issued certificate back. Neither the private key nor any password is ever in Terraform state. Renewal adds a new version to the same Key Vault certificate, so services that reference the versionless ID pick it up. Refreshing and planning only read certificate metadata and the public certificate from Key Vault: they never read a secret, sign, call the certificate authority or write anywhere, and they need neither the Cloudflare token nor the Resource Manager token. Those are needed only when an order runs.
 ---
 
 # conative_acme_certificate (Resource)
 
-A certificate in Azure Key Vault issued by an ACME certificate authority through DNS-01 challenges. Key Vault generates the private key (exportable, a new key for every version) and the signing request; the provider only passes the signing request to the authority and merges the issued certificate back. Neither the private key nor any password is ever in Terraform state. Renewal adds a new version to the same Key Vault certificate, so services that reference the versionless ID pick it up.
+A certificate in Azure Key Vault issued by an ACME certificate authority through DNS-01 challenges. Key Vault generates the private key (exportable, a new key for every version) and the signing request; the provider only passes the signing request to the authority and merges the issued certificate back. Neither the private key nor any password is ever in Terraform state. Renewal adds a new version to the same Key Vault certificate, so services that reference the versionless ID pick it up. Refreshing and planning only read certificate metadata and the public certificate from Key Vault: they never read a secret, sign, call the certificate authority or write anywhere, and they need neither the Cloudflare token nor the Resource Manager token. Those are needed only when an order runs.
 
 See the [ACME guide](../guides/acme-certificates-in-key-vault) for how issuance, renewal, failures and
 permissions work.
@@ -60,11 +60,11 @@ resource "conative_acme_certificate" "example" {
 ### Required
 
 - `certificate_name` (String) The Key Vault certificate name. The resource owns this certificate; creating it fails if the name already holds an issued certificate (import it instead). Changing it replaces the resource.
-- `common_name` (String) The certificate's common name; always also a subject alternative name. Changing it issues a new version.
+- `common_name` (String) The certificate's common name, at most 64 characters; always also a subject alternative name. Changing it issues a new version. Some certificate authorities leave the common name out of the certificate they issue; the provider then keeps the configured value.
 - `key_type` (String) `RSA2048`, `RSA3072`, `RSA4096`, `P256`, `P384`, `P521`. The certificate authority decides which it accepts (Let's Encrypt does not accept `P521`). Changing it issues a new version.
-- `key_vault_url` (String) The vault URL, for example `https://example.vault.azure.net/`. Changing it to another vault replaces the resource; a different spelling of the same URL does not.
-- `registration_id` (String) The `id` of a `conative_acme_registration`.
-- `revoke_on_destroy` (Boolean) Whether destroying the resource revokes the certificate at the authority before deleting it from Key Vault. A certificate that was imported and not yet renewed by this resource is never revoked (it was issued elsewhere); destroy warns and deletes it.
+- `key_vault_url` (String) The vault URL, for example `https://example.vault.azure.net/`. The host must end in `.vault.azure.net`; access tokens are sent to no other host. Changing it to another vault replaces the resource; a different spelling of the same URL does not.
+- `registration_id` (String) The `id` of a `conative_acme_registration`. Changing it to a registration at another certificate authority (a different `server_url`, for example from a staging to a production directory) orders a new certificate in place; changing it to another account at the same authority, or setting it after an import, only updates the state.
+- `revoke_on_destroy` (Boolean) Whether destroying the resource revokes the certificate at the authority before deleting it from Key Vault. The version revoked is the one this resource issued last (`issued_version`), not necessarily the current version. It is skipped when that version has expired or is gone, and for a certificate that was imported and not yet renewed by this resource (it was issued elsewhere): destroy then warns and only deletes it. Revoking signs a request with the account key.
 
 ### Optional
 
@@ -101,11 +101,14 @@ Required:
 
 Required:
 
-> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
-
-- `api_token` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) A Cloudflare API token with Zone Read and DNS Edit on the zone. Write-only: never stored in the plan or the state. Needs Terraform 1.11 or later. Supply it from an ephemeral value.
 - `match_domains` (Set of String) Names this zone answers for: a name is covered when it equals an entry or ends in `.<entry>` (ignoring a leading `*.`). When entries of several blocks match, the longest wins.
 - `zone` (String) The zone name, for example `example.com`.
+
+Optional:
+
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `api_token` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) A Cloudflare API token with Zone Read and DNS Edit on the zone. Write-only: never stored in the plan or the state. Needs Terraform 1.11 or later. Supply it from an ephemeral value. Optional because it is needed only when an order runs (a new certificate, a renewal or a change that orders): plans in which nothing is ordered succeed without it. When an order is planned and a name of the order is served by this block, a missing token is an error.
 
 ## Importing an existing certificate
 
@@ -137,12 +140,22 @@ policy, and it changes nothing.
   name, has a common name that is not one of its DNS names, has a subject alternative name that is not a DNS
   name (IP address, e-mail address, URI), has a name that is not a valid DNS name, or has a key other than
   RSA 2048/3072/4096 or EC P-256/P-384/P-521.
+- The first order replaces the certificate policy including its content type, which becomes
+  `application/x-pkcs12`. A certificate that was imported with a PEM secret becomes a PKCS #12 secret from then
+  on; consumers that read the secret must be able to handle that.
 - A certificate imported and not yet renewed by this resource is not revoked on destroy, even with
   `revoke_on_destroy = true`; destroy warns and deletes it from Key Vault.
 
+## Permissions
+
+See [Permissions](../guides/acme-certificates-in-key-vault#permissions) in the guide for the minimum
+Azure RBAC data actions per operation: refresh, import and plan need only `certificates/read`; ordering,
+renewing and destroying need more, and nothing ever reads a secret. The guide also explains how to force a
+renewal and exactly what `revoke_on_destroy` revokes.
+
 ## Import
 
-Import is supported using the following syntax:
+Import is supported using the versionless Key Vault certificate ID, `https://<vault>.vault.azure.net/certificates/<name>`:
 
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 

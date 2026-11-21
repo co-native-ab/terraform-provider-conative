@@ -59,6 +59,11 @@ that live in the repository under `internal/acctest`:
 - `azurednsfake` and `cloudflarefake`: the TXT record parts of the Azure DNS Resource Manager API and the
   Cloudflare API. Both write to the same `dnsstore` that the certificate authority reads.
 
+SQL Server is started only when an Azure SQL acceptance test first needs it, so running only the ACME
+tests (`-run 'TestAccACME|TestAccProvider_acme'`) never starts a container. The provider accepts only Key
+Vault names under `vault.azure.net`, so the fake vault is addressed as `fake.vault.azure.net` and the
+tests' HTTP client maps that name to the loopback listener.
+
 Every fake serves HTTPS on a loopback port with a certificate from a certificate authority generated for the
 run, trusted through `SSL_CERT_FILE` like the SQL proxy above, so they also need Linux. The provider has no
 setting that weakens certificate validation; the tests inject the base URLs and the DNS propagation check

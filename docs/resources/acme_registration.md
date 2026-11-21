@@ -3,12 +3,12 @@
 page_title: "conative_acme_registration Resource - conative"
 subcategory: ""
 description: |-
-  An account with an ACME certificate authority whose key is a Key Vault key. Every request to the authority is signed by Key Vault; the private key never leaves it. If the authority already has an account for the key, that account is used. Creating an account agrees to the authority's terms of service. Destroying the resource does not deactivate the account.
+  An account with an ACME certificate authority whose key is a Key Vault key. Every request to the authority is signed by Key Vault; the private key never leaves it. If the authority already has an account for the key, that account is used. Refreshing and planning never sign anything and never contact the authority: they only read the key's metadata from Key Vault. Creating, updating the email and importing sign. Creating an account agrees to the authority's terms of service. Destroying the resource does not deactivate the account.
 ---
 
 # conative_acme_registration (Resource)
 
-An account with an ACME certificate authority whose key is a Key Vault key. Every request to the authority is signed by Key Vault; the private key never leaves it. If the authority already has an account for the key, that account is used. Creating an account agrees to the authority's terms of service. Destroying the resource does not deactivate the account.
+An account with an ACME certificate authority whose key is a Key Vault key. Every request to the authority is signed by Key Vault; the private key never leaves it. If the authority already has an account for the key, that account is used. Refreshing and planning never sign anything and never contact the authority: they only read the key's metadata from Key Vault. Creating, updating the email and importing sign. Creating an account agrees to the authority's terms of service. Destroying the resource does not deactivate the account.
 
 ## Example Usage
 
@@ -35,12 +35,12 @@ resource "conative_acme_registration" "letsencrypt" {
 
 ### Required
 
-- `account_key_id` (String) The versioned ID of an existing Key Vault key, RSA (2048 bits or more) or EC (P-256, P-384 or P-521), with the `sign` operation permitted. Whether the key is exportable does not matter. Changing it replaces the registration.
+- `account_key_id` (String) The versioned ID of an existing Key Vault key (`https://<name>.vault.azure.net/keys/<key>/<version>`), RSA (2048 bits or more) or EC (P-256, P-384 or P-521), with the `sign` operation permitted. Whether the key is exportable does not matter. Some authorities do not accept every key: Let's Encrypt, for example, does not accept P-521 account keys. Changing it replaces the registration.
 - `server_url` (String) The ACME directory URL, for example Let's Encrypt's `https://acme-v02.api.letsencrypt.org/directory` (or its staging directory for testing). Changing it replaces the registration.
 
 ### Optional
 
-- `email` (String) A contact address for the account. Setting or changing it updates the account. Removing it stops managing the contact; the authority keeps the last address.
+- `email` (String) A contact address for the account. Setting or changing it updates the account (which signs a request with the account key). Removing it stops managing the contact; the authority keeps the last address. Some certificate authorities, Let's Encrypt among them, do not report or store an account's contact address, so it cannot be read back: Terraform keeps the configured value.
 
 ### Read-Only
 
@@ -55,5 +55,6 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 # The import ID is <server_url>|<account_key_id>. Quote it: it contains a pipe.
+# Importing looks up the account for the key, which signs a request with the key.
 terraform import conative_acme_registration.letsencrypt 'https://acme-v02.api.letsencrypt.org/directory|https://example.vault.azure.net/keys/acme-account/0123456789abcdef0123456789abcdef'
 ```
