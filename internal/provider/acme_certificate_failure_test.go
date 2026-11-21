@@ -54,6 +54,7 @@ func TestAccACMECertificate_failedValidationCleansUpAndRetries(t *testing.T) {
 				// A renewal that fails leaves the current version and the state as they were.
 				PreConfig: func() {
 					acc.ACME.SetValidity(365 * 24 * time.Hour)
+					acc.ACME.ExpireAuthorizations()
 					acc.ACME.FailValidation("*.apps.example.net")
 				},
 				ConfigVariables: acmeVariables(), Config: f.config(renew), ExpectError: failed,

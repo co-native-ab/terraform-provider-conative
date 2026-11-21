@@ -19,7 +19,7 @@ import (
 
 // acmeSecrets are the tokens of the run; every file and log is searched for them.
 func acmeSecrets() []string {
-	return []string{acc.KeyVaultToken, acc.ResourceManagerToken, acc.CloudflareToken}
+	return []string{acc.KeyVaultToken, acc.ResourceManagerToken, acc.CloudflareToken, acc.CloudflareReadOnlyToken}
 }
 
 // planNeverHoldsACMESecrets fails if the saved plan, as `terraform show -json` renders it,

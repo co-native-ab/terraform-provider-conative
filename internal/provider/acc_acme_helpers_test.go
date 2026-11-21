@@ -35,6 +35,7 @@ func newTestProviderFactories() map[string]func() (tfprotov6.ProviderServer, err
 				propagation:        acc.DNS.Checker(),
 				retryBase:          5 * time.Millisecond,
 				waitTimeout:        30 * time.Second,
+				httpClient:         acc.HTTPClient(),
 			}}
 			return providerserver.NewProtocol6WithError(p)()
 		},
@@ -93,6 +94,8 @@ func setupDNS(t *testing.T) {
 	acc.AzureDNS.AddZone(testSubscription, testResourceGrp, "example.net")
 	acc.Cloudflare.AddZone("example.com")
 	acc.Cloudflare.AddToken(acc.CloudflareToken, "example.com")
+	acc.Cloudflare.AddReadOnlyToken(acc.CloudflareReadOnlyToken, "example.com")
+	acc.KeyVault.SetReader(false)
 	acc.ACME.ClearFailures()
 	acc.ACME.SetValidity(90 * 24 * time.Hour)
 	acc.KeyVault.SetFailure(0)
@@ -101,6 +104,7 @@ func setupDNS(t *testing.T) {
 	reset := func() {
 		acc.ACME.ClearFailures()
 		acc.KeyVault.SetFailure(0)
+		acc.KeyVault.SetReader(false)
 		acc.AzureDNS.FailWrites(false)
 		acc.AzureDNS.FailDeletes(false)
 		acc.Cloudflare.FailWrites(false)

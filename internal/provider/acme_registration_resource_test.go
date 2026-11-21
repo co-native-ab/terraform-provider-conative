@@ -216,7 +216,7 @@ func TestAccACMERegistration_readFailureKeepsState(t *testing.T) {
 				ConfigVariables: acmeVariables(),
 				Config:          cfg,
 				PlanOnly:        true,
-				ExpectError:     regexp.MustCompile(`Key Vault answered 503`),
+				ExpectError:     regexp.MustCompile(`(?s)Key\s+Vault\s+answered\s+503`),
 			},
 			{
 				PreConfig:       func() { acc.KeyVault.SetFailure(0) },
