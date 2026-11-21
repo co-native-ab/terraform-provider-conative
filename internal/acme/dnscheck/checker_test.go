@@ -3,8 +3,10 @@ package dnscheck_test
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +36,13 @@ type responder struct {
 	tcpQueries    int
 	nonAuthPolls  int32 // number of TXT polls answered without the flag before it is set
 	nonAuthServed int32
+	// failRCode, when not zero, is the rcode of every TXT answer; failAA says whether
+	// those answers carry the authoritative-answer flag.
+	failRCode dnsmessage.RCode
+	failAA    bool
+	// nsCount is the number of name servers the NS answer lists (one when zero): ns1,
+	// ns2, ... under example.org, at 127.0.0.1, 127.0.0.2, ...
+	nsCount int
 }
 
 func startResponder(t *testing.T, txt string, appearAt int32) *responder {
@@ -117,10 +126,17 @@ func (r *responder) answer(in []byte, tcp bool) []byte {
 	switch question.Type {
 	case dnsmessage.TypeNS:
 		hdr.Type = dnsmessage.TypeNS
-		resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns1.example.org.")}})
+		for i := 1; i <= max(r.nsCount, 1); i++ {
+			ns := dnsmessage.MustNewName(fmt.Sprintf("ns%d.example.org.", i))
+			resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.NSResource{NS: ns}})
+		}
 	case dnsmessage.TypeA:
 		hdr.Type = dnsmessage.TypeA
-		resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}}})
+		last := byte(1)
+		if n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(question.Name.String(), "ns"), ".example.org.")); err == nil && n > 0 && n < 255 {
+			last = byte(n)
+		}
+		resp.Answers = append(resp.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, last}}})
 	case dnsmessage.TypeTXT:
 		if r.firstTXT.IsZero() {
 			r.firstTXT = time.Now()
@@ -132,6 +148,11 @@ func (r *responder) answer(in []byte, tcp bool) []byte {
 		if r.nonAuth || r.nonAuthServed < r.nonAuthPolls {
 			resp.Authoritative = false
 			r.nonAuthServed++
+		}
+		if r.failRCode != 0 {
+			resp.RCode = r.failRCode
+			resp.Authoritative = r.failAA
+			break
 		}
 		if r.truncateUDP && !tcp {
 			resp.Truncated = true
@@ -162,6 +183,44 @@ func (r *responder) checker(timeout time.Duration) dnscheck.Authoritative {
 		Resolver: &net.Resolver{PreferGo: true, Dial: dial},
 		Dial:     dial,
 	}
+}
+
+// checkerOf is a checker for a zone served by r, which names count name servers: ns1 is
+// r itself and ns2, ns3, ... are the responders in others. Every query for a record goes
+// to the responder of the name server's address.
+func (r *responder) checkerOf(timeout time.Duration, others ...*responder) dnscheck.Authoritative {
+	r.mu.Lock()
+	r.nsCount = 1 + len(others)
+	r.mu.Unlock()
+	byIP := map[string]string{"127.0.0.1": r.conn.LocalAddr().String()}
+	for i, o := range others {
+		byIP[fmt.Sprintf("127.0.0.%d", i+2)] = o.conn.LocalAddr().String()
+	}
+	lookup := r.conn.LocalAddr().String()
+	return dnscheck.Authoritative{
+		Timeout: timeout, Interval: 20 * time.Millisecond,
+		Resolver: &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, lookup)
+		}},
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(address)
+			var d net.Dialer
+			return d.DialContext(ctx, network, byIP[host])
+		},
+	}
+}
+
+func (r *responder) txtQueries() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.txtRD)
+}
+
+func (r *responder) answerWith(code dnsmessage.RCode, aa bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failRCode, r.failAA = code, aa
 }
 
 func rec(values ...string) []dnscheck.Record {
@@ -345,5 +404,102 @@ func TestDelayOnlyWaitsOnceAndChecksNothing(t *testing.T) {
 	cancel()
 	if err := (dnscheck.DelayOnly{Delay: time.Minute}).Wait(ctx, records); err == nil {
 		t.Error("a cancelled wait returned no error")
+	}
+}
+
+// Every name server of a zone that answers SERVFAIL or REFUSED without the
+// authoritative-answer flag is a DNS-intercepting proxy that does not pass the query on:
+// the check fails in the first round, with the hint, instead of waiting for the timeout.
+func TestEveryServerFailingWithoutFlagFailsAtOnce(t *testing.T) {
+	for name, code := range map[string]dnsmessage.RCode{"SERVFAIL": dnsmessage.RCodeServerFailure, "REFUSED": dnsmessage.RCodeRefused} {
+		t.Run(name, func(t *testing.T) {
+			r1 := startResponder(t, "value-1", 0)
+			r2 := startResponder(t, "value-1", 0)
+			r1.answerWith(code, false)
+			r2.answerWith(code, false)
+			start := time.Now()
+			err := r1.checkerOf(30*time.Second, r2).Wait(context.Background(), rec("value-1"))
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("took %s; it should fail before the timeout", elapsed)
+			}
+			for _, want := range []string{name, "every name server", "example.com", "authoritative-answer flag", "DNS-intercepting proxy", "dns_propagation_check = false"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "waited") {
+				t.Errorf("error %q is the timeout error", err)
+			}
+			// The first round asked every name server.
+			if r1.txtQueries() != 1 || r2.txtQueries() != 1 {
+				t.Errorf("queries: %d and %d, want one each", r1.txtQueries(), r2.txtQueries())
+			}
+		})
+	}
+}
+
+// When one name server answers properly the check does not fail early; at the timeout
+// the error still carries the hint.
+func TestSomeServersFailingWithoutFlagDoesNotFailEarly(t *testing.T) {
+	r1 := startResponder(t, "value-1", 0)
+	r2 := startResponder(t, "value-1", 0)
+	r2.answerWith(dnsmessage.RCodeServerFailure, false)
+	start := time.Now()
+	err := r1.checkerOf(600*time.Millisecond, r2).Wait(context.Background(), rec("value-1"))
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
+		t.Errorf("failed after %s, before the timeout", elapsed)
+	}
+	for _, want := range []string{"SERVFAIL", "waited", "authoritative-answer flag", "DNS-intercepting proxy", "dns_propagation_check = false"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if r1.txtQueries() < 2 {
+		t.Errorf("polling stopped after %d queries", r1.txtQueries())
+	}
+}
+
+// An authoritative SERVFAIL is the name server's own failure, not a proxy: it is retried
+// until the timeout and carries no proxy hint.
+func TestAuthoritativeServfailIsRetriedUntilTimeout(t *testing.T) {
+	r := startResponder(t, "value-1", 0)
+	r.answerWith(dnsmessage.RCodeServerFailure, true)
+	start := time.Now()
+	err := r.checkerOf(400*time.Millisecond).Wait(context.Background(), rec("value-1"))
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
+		t.Errorf("failed after %s, before the timeout", elapsed)
+	}
+	if !strings.Contains(err.Error(), "SERVFAIL") || !strings.Contains(err.Error(), "waited") {
+		t.Errorf("error %q should be the timeout error naming SERVFAIL", err)
+	}
+	if strings.Contains(err.Error(), "dns_propagation_check") {
+		t.Errorf("error %q has the proxy hint although the answer was authoritative", err)
+	}
+	if r.txtQueries() < 2 {
+		t.Errorf("polling stopped after %d queries", r.txtQueries())
+	}
+}
+
+// A zone with a single name server that answers SERVFAIL without the flag also fails at
+// once.
+func TestSingleServerFailingWithoutFlagFailsAtOnce(t *testing.T) {
+	r := startResponder(t, "value-1", 0)
+	r.answerWith(dnsmessage.RCodeRefused, false)
+	start := time.Now()
+	err := r.checker(30*time.Second).Wait(context.Background(), rec("value-1"))
+	if err == nil || !strings.Contains(err.Error(), "dns_propagation_check = false") {
+		t.Fatalf("error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %s", elapsed)
 	}
 }

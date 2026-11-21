@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest"
 )
@@ -44,22 +45,42 @@ func withCloudflareToken(token string) config.Variables {
 }
 
 // requireReadOnlyTraffic fails when, since the mark, anything was written, a key signed,
-// a secret was requested, or a certificate authority, DNS service or Cloudflare was
-// contacted at all.
+// a secret was requested, a pending operation was touched, Key Vault refused a request
+// for a missing right, or a certificate authority, DNS service or Cloudflare was contacted
+// at all.
 func requireReadOnlyTraffic(t *testing.T, m *acctest.Mark) func() {
+	return readOnlyTraffic(t, m, false)
+}
+
+// requireReadOnlyPlanTraffic is requireReadOnlyTraffic for a plan in which an order is
+// due: the plan reads the DNS zones (GET requests) to check the tokens, but writes
+// nothing and does not contact the certificate authority.
+func requireReadOnlyPlanTraffic(t *testing.T, m *acctest.Mark) func() {
+	return readOnlyTraffic(t, m, true)
+}
+
+func readOnlyTraffic(t *testing.T, m *acctest.Mark, dnsReads bool) func() {
 	return func() {
 		t.Helper()
 		if w := acc.WritesSince(*m); len(w) > 0 {
 			t.Errorf("writes: %v", w)
 		}
 		for _, r := range acc.RequestsSince(*m) {
-			if strings.Contains(r, "/sign") || strings.Contains(r, "/secrets") || strings.HasPrefix(r, "acme ") ||
-				strings.HasPrefix(r, "azuredns ") || strings.HasPrefix(r, "cloudflare ") {
+			dns := strings.HasPrefix(r, "azuredns ") || strings.HasPrefix(r, "cloudflare ")
+			switch {
+			case strings.Contains(r, "/sign"), strings.Contains(r, "/secrets"), strings.HasPrefix(r, "acme "):
+				t.Errorf("a read-only run made the request %s", r)
+			case strings.HasPrefix(r, "keyvault ") && strings.Contains(r, "/pending"):
+				t.Errorf("a read-only run touched a pending operation: %s", r)
+			case dns && (!dnsReads || !strings.Contains(r, " GET ")):
 				t.Errorf("a read-only run made the request %s", r)
 			}
 		}
 		if v := acc.KeyVault.Violations(); len(v) > 0 {
 			t.Errorf("forbidden Key Vault requests: %v", v)
+		}
+		if f := acc.ForbiddenSince(*m); len(f) > 0 {
+			t.Errorf("Key Vault refused requests for a missing right: %v", f)
 		}
 	}
 }
@@ -215,6 +236,136 @@ func TestAccACMECertificate_readOnlyCloudflareToken(t *testing.T) {
 					}
 					return nil
 				},
+			},
+		},
+	})
+}
+
+// orderDueChecks are the plan checks of an in-place update in which an order is due: the
+// resource is updated and everything the order produces is unknown.
+func orderDueChecks() resource.ConfigPlanChecks {
+	checks := []plancheck.PlanCheck{plancheck.ExpectResourceAction(certAddr, plancheck.ResourceActionUpdate)}
+	for _, a := range []string{"version", "issued_version", "thumbprint", "not_after", "certificate_pem"} {
+		checks = append(checks, plancheck.ExpectUnknownValue(certAddr, tfjsonpath.New(a)))
+	}
+	return resource.ConfigPlanChecks{PostApplyPreRefresh: checks, PostApplyPostRefresh: checks}
+}
+
+// A caller that may only read certificates and keys can plan an order that is due: the plan
+// shows the update with the ordered values unknown, reads only certificates and zones, and
+// never touches a pending operation (Key Vault authorises even reading one as a write
+// action), whatever record the vault holds.
+func TestAccACMECertificate_readOnlyPlanWithOrderDue(t *testing.T) {
+	accPreCheck(t)
+	cases := map[string]func(t *testing.T, cert string){
+		"the record of the provider's own earlier order": func(*testing.T, string) {},
+		"a completed record of another issuer": func(t *testing.T, cert string) {
+			if err := acc.KeyVault.AddFinishedOperation(cert, "OtherCA", "completed"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a cancelled record of another issuer": func(t *testing.T, cert string) {
+			if err := acc.KeyVault.AddFinishedOperation(cert, "OtherCA", "cancelled"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"an operation in progress of another issuer": func(_ *testing.T, cert string) {
+			acc.KeyVault.AddPendingOperation(cert, "OtherCA")
+		},
+		"a leftover operation in progress of issuer Unknown": func(_ *testing.T, cert string) {
+			acc.KeyVault.AddPendingOperation(cert, "Unknown")
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newACMEFixture(t, "P256")
+			opts := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+			due := opts
+			due.MinDays = 100
+			readerCfg := providerWithoutARM() + f.registrationHCL(`email = "certificates@example.com"`) + f.certHCL(due)
+			var mark acctest.Mark
+			t.Cleanup(func() { acc.KeyVault.SetReader(false) })
+			resource.Test(t, resource.TestCase{
+				ProtoV6ProviderFactories: newTestProviderFactories(),
+				Steps: []resource.TestStep{
+					{ConfigVariables: acmeVariables(), Config: f.config(opts)},
+					{
+						PreConfig: func() {
+							acc.ACME.SetValidity(365 * 24 * time.Hour)
+							seed(t, f.Cert)
+							acc.KeyVault.SetReader(true)
+							mark = acc.Mark()
+						},
+						ConfigVariables: withCloudflareToken(acc.CloudflareReadOnlyToken), Config: readerCfg,
+						PlanOnly: true, ExpectNonEmptyPlan: true,
+						ConfigPlanChecks: orderDueChecks(),
+					},
+					{
+						PreConfig: func() {
+							requireReadOnlyPlanTraffic(t, &mark)()
+							if n := len(acc.RequestsSince(mark)); n == 0 {
+								t.Error("the plan made no request at all")
+							}
+							acc.KeyVault.SetReader(false)
+						},
+						ConfigVariables: acmeVariables(), Config: f.config(opts), PlanOnly: true,
+					},
+				},
+			})
+		})
+	}
+}
+
+// An operation in progress of another issuer does not stop a plan; the apply refuses to
+// order, says which issuer holds the operation and writes nothing.
+func TestAccACMECertificate_pendingOperationOfAnotherIssuerFailsAtApply(t *testing.T) {
+	accPreCheck(t)
+	f := newACMEFixture(t, "P256")
+	opts := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	due := opts
+	due.MinDays = 100
+	readerCfg := providerWithoutARM() + f.registrationHCL(`email = "certificates@example.com"`) + f.certHCL(due)
+	var mark acctest.Mark
+	t.Cleanup(func() { acc.KeyVault.SetReader(false) })
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: f.config(opts)},
+			{
+				PreConfig: func() {
+					acc.ACME.SetValidity(365 * 24 * time.Hour)
+					acc.KeyVault.AddPendingOperation(f.Cert, "OtherCA")
+					acc.KeyVault.SetReader(true)
+					mark = acc.Mark()
+				},
+				ConfigVariables: withCloudflareToken(acc.CloudflareReadOnlyToken), Config: readerCfg,
+				PlanOnly: true, ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: orderDueChecks(),
+			},
+			{
+				PreConfig: func() {
+					requireReadOnlyPlanTraffic(t, &mark)()
+					acc.KeyVault.SetReader(false)
+					mark = acc.Mark()
+				},
+				ConfigVariables: acmeVariables(), Config: f.config(due),
+				ExpectError: regexp.MustCompile(`(?s)OtherCA.*wait\s+for\s+it\s+to\s+finish.*cancel\s+it\s+in\s+Key\s+Vault.*apply\s+again`),
+			},
+			{
+				PreConfig: func() {
+					if w := acc.WritesSince(mark); len(w) > 0 {
+						t.Errorf("the refused order wrote: %v", w)
+					}
+					for _, r := range acc.RequestsSince(mark) {
+						if strings.HasPrefix(r, "acme ") {
+							t.Errorf("the refused order contacted the certificate authority: %s", r)
+						}
+					}
+					if issuer, status, ok := acc.KeyVault.PendingRecord(f.Cert); !ok || issuer != "OtherCA" || status != "inProgress" {
+						t.Errorf("the operation of the other issuer was touched: %q %q %v", issuer, status, ok)
+					}
+				},
+				ConfigVariables: acmeVariables(), Config: f.config(due), PlanOnly: true, ExpectNonEmptyPlan: true,
 			},
 		},
 	})

@@ -407,8 +407,11 @@ func missingResourceManagerTokenMessage(b acme.Block, reason string) string {
 }
 
 // preflight reads, without writing anything, what an order needs: that the Key Vault
-// name is free (create) or has no foreign pending operation, and that every DNS zone
-// can be reached. Values that are not known yet skip the checks; the order repeats them.
+// name is free (create) and that every DNS zone can be reached. It only lists the
+// certificate's versions (certificates/read); it never reads the pending operation,
+// which Key Vault authorises as certificates/create/action. Pending operations are
+// handled when the order runs. Values that are not known yet skip the checks; the order
+// repeats them.
 func (r *acmeCertificateResource) preflight(ctx context.Context, plan acmeCertificateModel, cfg tfConfig, creating bool, diags *diag.Diagnostics) {
 	pd, _ := r.data.(*providerData)
 	if pd == nil || pd.acme == nil || pd.acme.unknown {
@@ -445,7 +448,7 @@ func (r *acmeCertificateResource) preflight(ctx context.Context, plan acmeCertif
 		operationError(diags, "check", plan.object(), err)
 		return
 	}
-	if _, err := issuer.CheckVault(ctx, kv, name, creating, acme.CertificateID(vault, name)); err != nil {
+	if err := issuer.CheckVersions(ctx, kv, name, creating, acme.CertificateID(vault, name)); err != nil {
 		diags.AddError("Cannot order the certificate", err.Error())
 		return
 	}

@@ -176,8 +176,9 @@ func ServerName(p *tdsproxy.Proxy) string {
 	return fmt.Sprintf("localhost:%d", port)
 }
 
-// Mark is a position in the request journals of the four fakes.
-type Mark struct{ acme, keyVault, azureDNS, cloudflare int }
+// Mark is a position in the request journals of the four fakes, and in the list of
+// requests the Key Vault fake refused for a missing data action.
+type Mark struct{ acme, keyVault, azureDNS, cloudflare, forbidden int }
 
 // ACMEPosition is the position in the certificate authority's journal.
 func (m Mark) ACMEPosition() int { return m.acme }
@@ -190,8 +191,12 @@ func (m Mark) CloudflarePosition() int { return m.cloudflare }
 
 // Mark returns the current position of every journal.
 func (e *Env) Mark() Mark {
-	return Mark{e.ACME.Journal.Mark(), e.KeyVault.Journal.Mark(), e.AzureDNS.Journal.Mark(), e.Cloudflare.Journal.Mark()}
+	return Mark{e.ACME.Journal.Mark(), e.KeyVault.Journal.Mark(), e.AzureDNS.Journal.Mark(), e.Cloudflare.Journal.Mark(), e.KeyVault.ForbiddenMark()}
 }
+
+// ForbiddenSince lists the Key Vault requests since the mark that were refused with 403
+// because the caller lacked the data action.
+func (e *Env) ForbiddenSince(m Mark) []string { return e.KeyVault.ForbiddenSince(m.forbidden) }
 
 // WritesSince lists, across the four fakes, the requests since the mark that changed
 // something. Reads (including Key Vault sign operations and ACME account lookups) are

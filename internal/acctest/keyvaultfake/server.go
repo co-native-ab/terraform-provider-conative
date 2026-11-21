@@ -107,7 +107,8 @@ type Server struct {
 	allKeys        []crypto.Signer
 	violations     []string
 	failStatus     int
-	reader         bool
+	granted        map[string]bool // data actions the caller may use; nil grants every one
+	forbidden      []string        // requests answered 403 for a missing data action
 	forbidKeyReads bool
 	otherCA        *x509.Certificate
 	otherKey       *ecdsa.PrivateKey
@@ -240,14 +241,112 @@ func (s *Server) SetFailure(status int) {
 	s.failStatus = status
 }
 
-// SetReader switches the vault to the rights of a read-only caller: the sign operation,
-// every secrets request and every write to a key or a certificate (create, merge,
-// delete) answer 403, and reads still work. Requests are journaled as usual, so a test
-// can prove the provider did not even try.
+// The Key Vault data actions (Azure RBAC) the fake authorises requests with. Key Vault
+// authorises every pending-operation request, even a read, as certificates/create/action.
+const (
+	ActionCertificatesRead   = "Microsoft.KeyVault/vaults/certificates/read"
+	ActionCertificatesCreate = "Microsoft.KeyVault/vaults/certificates/create/action"
+	ActionCertificatesDelete = "Microsoft.KeyVault/vaults/certificates/delete"
+	ActionKeysRead           = "Microsoft.KeyVault/vaults/keys/read"
+	ActionKeysSign           = "Microsoft.KeyVault/vaults/keys/sign/action"
+	ActionSecretsGet         = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
+)
+
+// dataAction maps a request to the data action Key Vault authorises it with; it is empty
+// for a request the fake does not know, which restricted rights refuse.
+func dataAction(method, path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	switch parts[0] {
+	case "secrets":
+		return ActionSecretsGet
+	case "keys":
+		switch {
+		case len(parts) == 3 && method == http.MethodGet:
+			return ActionKeysRead
+		case len(parts) == 4 && parts[3] == "sign" && method == http.MethodPost:
+			return ActionKeysSign
+		}
+	case "certificates":
+		switch {
+		case len(parts) >= 3 && parts[2] == "pending":
+			return ActionCertificatesCreate // reading a pending operation needs it too
+		case len(parts) == 3 && parts[2] == "create" && method == http.MethodPost:
+			return ActionCertificatesCreate
+		case method == http.MethodGet && (len(parts) == 2 || len(parts) == 3):
+			return ActionCertificatesRead // the certificate, a version, the list of versions
+		case method == http.MethodDelete && len(parts) == 2:
+			return ActionCertificatesDelete
+		}
+	}
+	return ""
+}
+
+// SetReader switches the vault to the rights of a read-only caller: only
+// certificates/read and keys/read are granted (as the Key Vault Reader role does), so
+// the sign operation, every secrets request, every pending operation (even reading
+// one), create, merge and delete answer 403. Requests are journaled as usual, so a test
+// can prove the provider did not even try. SetReader(false) grants every action again.
 func (s *Server) SetReader(on bool) {
+	if on {
+		s.SetDataActions(ActionCertificatesRead, ActionKeysRead)
+		return
+	}
+	s.GrantAll()
+}
+
+// SetDataActions grants exactly the given data actions.
+func (s *Server) SetDataActions(actions ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.reader = on
+	s.granted = map[string]bool{}
+	for _, a := range actions {
+		s.granted[a] = true
+	}
+}
+
+// GrantAll grants every data action (the default).
+func (s *Server) GrantAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.granted = nil
+}
+
+// ForbiddenMark returns the position to pass to ForbiddenSince.
+func (s *Server) ForbiddenMark() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.forbidden)
+}
+
+// ForbiddenSince lists the requests answered 403 for a missing data action since the
+// mark, as "METHOD /path (data action)".
+func (s *Server) ForbiddenSince(mark int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if mark > len(s.forbidden) {
+		mark = len(s.forbidden)
+	}
+	return slices.Clone(s.forbidden[mark:])
+}
+
+// Forbidden lists every request answered 403 for a missing data action.
+func (s *Server) Forbidden() []string { return s.ForbiddenSince(0) }
+
+// denyAction answers like Key Vault does when the caller lacks a data action, and
+// records the request.
+func (s *Server) denyAction(w http.ResponseWriter, r *http.Request, action string) {
+	s.forbidden = append(s.forbidden, r.Method+" "+r.URL.Path+" ("+action+")")
+	apiError(w, http.StatusForbidden, "Forbidden", "Caller is not authorized to perform action on resource.\r\n"+
+		"If role assignments, deny assignments or role definitions were changed recently, please observe propagation time.\r\n"+
+		"Caller: appid=00000000-0000-0000-0000-000000000000;oid=00000000-0000-0000-0000-000000000000\r\n"+
+		"Action: '"+action+"'\r\n"+
+		"Resource: '/subscriptions/00000000-0000-0000-0000-000000000000/resourcegroups/example/providers/microsoft.keyvault/vaults/fake'\r\n"+
+		"Assignment: (not found)\r\n"+
+		"DecisionReason: 'DeniedWithNoValidRBAC'\r\n"+
+		"Vault: fake;location=example")
 }
 
 // PrivateKeysDER returns every private key the fake generated or holds, as PKCS #8 DER.
@@ -499,6 +598,20 @@ func (s *Server) AddPendingOperation(name, issuer string) {
 	c.pending = &pendingOp{version: v, issuer: issuer, status: statusInProgress}
 }
 
+// AddFinishedOperation seeds a finished pending-operation record (status "completed",
+// "failed" or "cancelled") of any issuer on an existing certificate, as Key Vault keeps
+// it after an operation ends. It adds no version.
+func (s *Server) AddFinishedOperation(name, issuer, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.certs[name]
+	if c == nil || c.deleted || len(c.versions) == 0 {
+		return fmt.Errorf("no certificate %q", name)
+	}
+	c.pending = &pendingOp{version: c.versions[len(c.versions)-1], issuer: issuer, status: status}
+	return nil
+}
+
 func subject(cn string) string {
 	if cn == "" {
 		return ""
@@ -561,8 +674,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		apiError(w, s.failStatus, "ServiceUnavailable", "the vault is failing (test control)")
 		return
 	}
-	if s.reader && (r.Method != http.MethodGet || strings.Contains(path, "/secrets") || strings.HasSuffix(path, "/sign")) {
-		apiError(w, http.StatusForbidden, "Forbidden", "the caller is not authorized to perform this operation (reader mode)")
+	// With restricted rights the fake fails closed: a request it cannot map to a data
+	// action is refused, so a new kind of request cannot slip through a read-only test.
+	if action := dataAction(r.Method, path); s.granted != nil && (action == "" || !s.granted[action]) {
+		if action == "" {
+			action = "unknown data action"
+		}
+		s.denyAction(w, r, action)
 		return
 	}
 	if r.URL.Query().Get("api-version") != "7.5" {
@@ -573,7 +691,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 3 && parts[0] == "keys" && r.Method == http.MethodGet:
 		if s.forbidKeyReads {
-			apiError(w, http.StatusForbidden, "Forbidden", "the caller is not authorized to read keys")
+			s.denyAction(w, r, ActionKeysRead)
 			return
 		}
 		s.getKey(w, parts[1], parts[2])

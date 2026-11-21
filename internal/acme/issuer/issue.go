@@ -318,12 +318,28 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	return Result{Bundle: bundle, Info: info}, nil
 }
 
-// prepareKeyVault checks the certificate in Key Vault and deletes a leftover pending
-// operation (one in progress of issuer Unknown, or a finished record of any issuer).
+// prepareKeyVault runs at apply, right before an order. It checks the certificate in
+// Key Vault and deals with the pending operation: a record that is not in progress
+// (completed, failed or cancelled, of any issuer) and one in progress of issuer Unknown
+// (left over from an earlier failed run) are deleted; one in progress of another issuer
+// fails the order, and nothing is written.
 func (o Order) prepareKeyVault(ctx context.Context) error {
-	del, err := CheckVault(ctx, o.Vault, o.Certificate, o.Creating, o.ImportID)
+	state, err := readVersions(ctx, o.Vault, o.Certificate)
 	if err != nil {
 		return err
+	}
+	// Key Vault authorises every request to the pending-operation endpoint, even a read,
+	// as certificates/create/action. Only an order, which needs that right anyway, reads it.
+	p, err := o.Vault.GetPending(ctx, o.Certificate)
+	switch {
+	case err == nil:
+		state.HasPending, state.PendingIssuer, state.PendingStatus = true, p.Issuer, p.Status
+	case !errors.Is(err, keyvault.ErrNotFound):
+		return fmt.Errorf("cannot read the pending operation of the Key Vault certificate %q: %w", o.Certificate, err)
+	}
+	del, err := acme.PrepareKeyVault(state, o.Creating, o.ImportID)
+	if err != nil {
+		return fmt.Errorf("%q: %w", o.Certificate, err)
 	}
 	if del {
 		if err := o.Vault.DeletePending(ctx, o.Certificate); err != nil {
@@ -333,33 +349,36 @@ func (o Order) prepareKeyVault(ctx context.Context) error {
 	return nil
 }
 
-// CheckVault reads the versions and the pending operation of a Key Vault certificate and
-// applies the decision of acme.PrepareKeyVault. It only reads. It reports whether a
-// leftover pending operation has to be deleted before an order. A finished operation
-// (completed, failed or cancelled) never fails it, whatever its issuer.
-func CheckVault(ctx context.Context, vault *keyvault.Client, name string, creating bool, importID string) (deletePending bool, err error) {
+// CheckVersions is the check a plan makes: it lists the versions of the Key Vault
+// certificate (certificates/read) and, when the certificate has to be created, refuses
+// a name that already has an issued version. It never touches the pending-operation
+// endpoint, which Key Vault authorises as a write (certificates/create/action) even for
+// a read; pending operations are handled only when an order runs.
+func CheckVersions(ctx context.Context, vault *keyvault.Client, name string, creating bool, importID string) error {
+	state, err := readVersions(ctx, vault, name)
+	if err != nil {
+		return err
+	}
+	if _, err := acme.PrepareKeyVault(state, creating, importID); err != nil {
+		return fmt.Errorf("%q: %w", name, err)
+	}
+	return nil
+}
+
+// readVersions lists the versions of a Key Vault certificate; a certificate that does not
+// exist has none.
+func readVersions(ctx context.Context, vault *keyvault.Client, name string) (acme.VaultState, error) {
 	var state acme.VaultState
 	versions, err := vault.ListVersions(ctx, name)
 	if err != nil && !errors.Is(err, keyvault.ErrNotFound) {
-		return false, fmt.Errorf("cannot read the versions of the Key Vault certificate %q: %w", name, err)
+		return state, fmt.Errorf("cannot read the versions of the Key Vault certificate %q: %w", name, err)
 	}
 	for _, v := range versions {
 		if v.Issued {
 			state.HasIssuedVersion = true
 		}
 	}
-	p, err := vault.GetPending(ctx, name)
-	switch {
-	case err == nil:
-		state.HasPending, state.PendingIssuer, state.PendingStatus = true, p.Issuer, p.Status
-	case !errors.Is(err, keyvault.ErrNotFound):
-		return false, fmt.Errorf("cannot read the pending operation of the Key Vault certificate %q: %w", name, err)
-	}
-	del, err := acme.PrepareKeyVault(state, creating, importID)
-	if err != nil {
-		return false, fmt.Errorf("%q: %w", name, err)
-	}
-	return del, nil
+	return state, nil
 }
 
 // removeAll removes every record written so far and forgets the ones it removed. The
