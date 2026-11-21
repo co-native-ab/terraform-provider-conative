@@ -44,7 +44,7 @@ func (a Authoritative) Wait(ctx context.Context, fqdn, zone string, values []str
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	nss, err := resolver.LookupNS(ctx, zone)
+	nss, err := resolver.LookupNS(ctx, absolute(zone))
 	if err != nil || len(nss) == 0 {
 		return fmt.Errorf("cannot find the name servers of the zone %q: %w", zone, orNoServers(err))
 	}
@@ -73,6 +73,10 @@ func (a Authoritative) Wait(ctx context.Context, fqdn, zone string, values []str
 	}
 }
 
+// absolute returns the name with a trailing dot, so that the resolver does not try the
+// names of a search list first (for example example.com.corp.local).
+func absolute(name string) string { return strings.TrimSuffix(name, ".") + "." }
+
 func orNoServers(err error) error {
 	if err != nil {
 		return err
@@ -91,7 +95,7 @@ func (a Authoritative) missing(ctx context.Context, servers []string, fqdn strin
 			var d net.Dialer
 			return d.DialContext(ctx, network, addr)
 		}}
-		got, err := r.LookupTXT(ctx, fqdn)
+		got, err := r.LookupTXT(ctx, absolute(fqdn))
 		if err != nil {
 			var de *net.DNSError
 			if !errors.As(err, &de) || !de.IsNotFound {

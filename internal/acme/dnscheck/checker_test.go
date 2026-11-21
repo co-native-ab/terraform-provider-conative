@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ type responder struct {
 	txt      string
 	appearAt int32
 	polls    atomic.Int32
+
+	mu    sync.Mutex
+	names []string // names asked for, as received
 }
 
 func startResponder(t *testing.T, txt string, appearAt int32) *responder {
@@ -46,6 +50,9 @@ func (r *responder) serve() {
 			continue
 		}
 		question := q.Questions[0]
+		r.mu.Lock()
+		r.names = append(r.names, question.Name.String())
+		r.mu.Unlock()
 		resp := dnsmessage.Message{
 			Header:    dnsmessage.Header{ID: q.ID, Response: true, Authoritative: true, RCode: dnsmessage.RCodeSuccess},
 			Questions: q.Questions,
@@ -116,5 +123,24 @@ func TestCancellationStopsPolling(t *testing.T) {
 	err := r.checker(time.Minute).Wait(ctx, "_acme-challenge.example.com", "example.com", []string{"v"})
 	if err == nil || time.Since(start) > 5*time.Second {
 		t.Fatalf("polling did not stop on cancellation: %v after %s", err, time.Since(start))
+	}
+}
+
+// Names are queried as absolute names, so that a search list in the resolver
+// configuration cannot make the check look at the wrong record.
+func TestQueriesAreAbsolute(t *testing.T) {
+	r := startResponder(t, "value-1", 0)
+	if err := r.checker(5*time.Second).Wait(context.Background(), "_acme-challenge.example.com", "example.com", []string{"value-1"}); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.names) == 0 {
+		t.Fatal("no query was seen")
+	}
+	for _, n := range r.names {
+		if n != "example.com." && n != "_acme-challenge.example.com." {
+			t.Errorf("unexpected query for %q", n)
+		}
 	}
 }
