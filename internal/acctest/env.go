@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/acmefake"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/azurednsfake"
@@ -16,19 +19,24 @@ import (
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest/tdsproxy"
 )
 
-// Env is everything an acceptance run needs: a SQL Server container, certificates, a
-// sign-in proxy in front of the container, and the token the proxy accepts.
+// Env is everything an acceptance run needs: certificates, the fakes of the ACME area,
+// and, for the Azure SQL tests, a SQL Server container with a sign-in proxy in front of
+// it and the token the proxy accepts. The container is started the first time a test asks
+// for it (Container, Proxy, Server, NewProxy), so a run of only the ACME tests never needs
+// Docker.
 type Env struct {
-	Container *Container
-	Certs     *Certs
-	Proxy     *tdsproxy.Proxy
+	Certs *Certs
 	// Token is the access token the proxy accepts. It is random per run, as long as a
 	// real token, so that tests can search for it.
 	Token string
 	// WrongToken is a different token of the same shape that the proxy refuses.
 	WrongToken string
-	// Server is "localhost:port" of the proxy: what a provider configuration uses.
-	Server string
+
+	sqlOnce   sync.Once
+	sqlErr    error
+	container *Container
+	proxy     *tdsproxy.Proxy
+	server    string
 
 	// The fakes of the ACME area and the DNS they share. They serve HTTPS on localhost
 	// with the per-run certificate and accept only their own random token.
@@ -42,14 +50,16 @@ type Env struct {
 	KeyVaultToken        string
 	ResourceManagerToken string
 	CloudflareToken      string
+	// CloudflareReadOnlyToken is a Cloudflare token the fake accepts for reads only.
+	CloudflareReadOnlyToken string
 
 	dir string
 }
 
 // SetupEnv generates certificates, makes clients trust them by pointing SSL_CERT_FILE
-// at the authority (this must happen before anything uses TLS), starts the container
-// and the proxy. Callers must call Close.
-func SetupEnv(ctx context.Context) (*Env, error) {
+// at the authority (this must happen before anything uses TLS) and starts the fakes. It
+// does not start SQL Server; see Env. Callers must call Close.
+func SetupEnv() (*Env, error) {
 	dir, err := os.MkdirTemp("", "conative-acc-")
 	if err != nil {
 		return nil, err
@@ -72,7 +82,7 @@ func SetupEnv(ctx context.Context) (*Env, error) {
 	if e.WrongToken, err = randomToken(); err != nil {
 		return fail(err)
 	}
-	for _, t := range []*string{&e.KeyVaultToken, &e.ResourceManagerToken, &e.CloudflareToken} {
+	for _, t := range []*string{&e.KeyVaultToken, &e.ResourceManagerToken, &e.CloudflareToken, &e.CloudflareReadOnlyToken} {
 		if *t, err = randomToken(); err != nil {
 			return fail(err)
 		}
@@ -86,30 +96,66 @@ func SetupEnv(ctx context.Context) (*Env, error) {
 	}
 	e.AzureDNS = azurednsfake.Start(e.Certs.Server, e.ResourceManagerToken, e.DNS)
 	e.Cloudflare = cloudflarefake.Start(e.Certs.Server, e.DNS)
-	if e.Container, err = StartContainer(ctx); err != nil {
-		return fail(err)
-	}
-	if e.Proxy, err = e.NewProxy(); err != nil {
-		return fail(err)
-	}
-	e.Server = ServerName(e.Proxy)
 	return e, nil
 }
+
+// startSQL starts the SQL Server container and the sign-in proxy once.
+func (e *Env) startSQL() {
+	e.sqlOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		var err error
+		if e.container, err = StartContainer(ctx); err != nil {
+			e.sqlErr = err
+			return
+		}
+		if e.proxy, err = e.newProxyAt("127.0.0.1:0"); err != nil {
+			e.sqlErr = err
+			return
+		}
+		e.server = ServerName(e.proxy)
+	})
+	if e.sqlErr != nil {
+		// The Azure SQL tests cannot run without the container; failing here fails the
+		// test that needs it with the reason, instead of every test of the run.
+		panic(fmt.Sprintf("cannot set up SQL Server for the acceptance tests (is Docker running?): %v", e.sqlErr))
+	}
+}
+
+// Container returns the SQL Server container, starting it on first use.
+func (e *Env) Container() *Container { e.startSQL(); return e.container }
+
+// Proxy returns the sign-in proxy in front of the container, starting both on first use.
+func (e *Env) Proxy() *tdsproxy.Proxy { e.startSQL(); return e.proxy }
+
+// Server is "localhost:port" of the proxy: what a provider configuration uses. It starts
+// the container on first use.
+func (e *Env) Server() string { e.startSQL(); return e.server }
 
 // NewProxy starts another sign-in proxy in front of the same container, for tests that
 // need to stop one without affecting the others.
 func (e *Env) NewProxy() (*tdsproxy.Proxy, error) { return e.NewProxyAt("127.0.0.1:0") }
 
+// HTTPClient returns an HTTP client for the ACME area that trusts the per-run authority
+// and connects names under vault.azure.net (the fake Key Vault is addressed by one) to the
+// loopback interface.
+func (e *Env) HTTPClient() *http.Client { return e.Certs.HTTPClientWithVault() }
+
 // NewProxyAt starts a sign-in proxy listening on a given address, for example to bring
 // a proxy back on the address of one that was closed.
 func (e *Env) NewProxyAt(listenAddr string) (*tdsproxy.Proxy, error) {
+	e.startSQL()
+	return e.newProxyAt(listenAddr)
+}
+
+func (e *Env) newProxyAt(listenAddr string) (*tdsproxy.Proxy, error) {
 	return tdsproxy.Start(tdsproxy.Config{
 		ListenAddr:   listenAddr,
 		Certificate:  e.Certs.Server,
 		Token:        e.Token,
-		UpstreamAddr: e.Container.Addr,
+		UpstreamAddr: e.container.Addr,
 		UpstreamUser: "sa",
-		UpstreamPass: e.Container.Password,
+		UpstreamPass: e.container.Password,
 	})
 }
 
@@ -183,11 +229,11 @@ func (e *Env) Close() {
 	if e.Cloudflare != nil {
 		e.Cloudflare.Close()
 	}
-	if e.Proxy != nil {
-		_ = e.Proxy.Close()
+	if e.proxy != nil {
+		_ = e.proxy.Close()
 	}
-	if e.Container != nil {
-		e.Container.Remove()
+	if e.container != nil {
+		e.container.Remove()
 	}
 	if e.dir != "" {
 		_ = os.RemoveAll(e.dir)

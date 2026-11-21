@@ -53,12 +53,12 @@ func TestAccProvider_tokenFromAzidentity(t *testing.T) {
 	t.Setenv("TF_ACC_TEMP_DIR", dir)
 	t.Setenv(azidentityTokenEnv, acc.Token)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "reader"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "reader"); err != nil {
 		t.Fatal(err)
 	}
 	var files int
 
-	cfg := azidentityConfig(acc.Server, fmt.Sprintf(`
+	cfg := azidentityConfig(acc.Server(), fmt.Sprintf(`
 resource "conative_azuresql_database_role_member" "m" {
   database = %[1]q
   role     = "db_datareader"
@@ -111,7 +111,7 @@ func TestAccProvider_wrongTokenFromAzidentityFailsFast(t *testing.T) {
 		ExternalProviders:        azidentityProvider,
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
-			Config: azidentityConfig(acc.Server, fmt.Sprintf(`
+			Config: azidentityConfig(acc.Server(), fmt.Sprintf(`
 data "conative_azuresql_database_users" "all" {
   database = %q
 }

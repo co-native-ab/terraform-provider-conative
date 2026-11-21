@@ -20,10 +20,10 @@ data "conative_azuresql_database_user" "u" {
 func TestAccDatabaseUserDataSource_reads(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "lookup"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "lookup"); err != nil {
 		t.Fatal(err)
 	}
-	sid, err := acc.Container.QueryStringAsSA(db, "SELECT '0x' + CONVERT(varchar(100), sid, 2) FROM sys.database_principals WHERE name = 'lookup'")
+	sid, err := acc.Container().QueryStringAsSA(db, "SELECT '0x' + CONVERT(varchar(100), sid, 2) FROM sys.database_principals WHERE name = 'lookup'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestAccDatabaseUserDataSource_hostileName(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	name := "x'; DROP TABLE y; --]"
-	if err := acc.Container.CreateUserWithoutLogin(db, name); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, name); err != nil {
 		t.Fatal(err)
 	}
 	resource.Test(t, resource.TestCase{

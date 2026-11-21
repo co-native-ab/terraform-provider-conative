@@ -23,7 +23,7 @@ resource "conative_azuresql_database_role_member" "m" {
 }
 
 func isMember(db, role, member string) (bool, error) {
-	n, err := acc.Container.QueryIntAsSA(db, azuresql.RoleMembershipQuery, role, member)
+	n, err := acc.Container().QueryIntAsSA(db, azuresql.RoleMembershipQuery, role, member)
 	return n > 0, err
 }
 
@@ -43,11 +43,11 @@ func memberCheck(db, role, member string, want bool) resource.TestCheckFunc {
 func TestAccDatabaseRoleMember_lifecycle(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "worker"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "worker"); err != nil {
 		t.Fatal(err)
 	}
 	// A membership the resource must never touch.
-	if err := acc.Container.ExecAsSA(db, "ALTER ROLE [db_datawriter] ADD MEMBER [worker];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "ALTER ROLE [db_datawriter] ADD MEMBER [worker];"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,7 +82,7 @@ func TestAccDatabaseRoleMember_lifecycle(t *testing.T) {
 func TestAccDatabaseRoleMember_twoRoles(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "both"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "both"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := providerConfig() + fmt.Sprintf(`
@@ -137,7 +137,7 @@ func TestAccDatabaseRoleMember_rejectsRolesOutsideTheFixedSet(t *testing.T) {
 func TestAccDatabaseRoleMember_drift(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "drifter"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "drifter"); err != nil {
 		t.Fatal(err)
 	}
 	const addr = "conative_azuresql_database_role_member.m"
@@ -153,7 +153,7 @@ func TestAccDatabaseRoleMember_drift(t *testing.T) {
 			},
 			{
 				PreConfig: func() {
-					if err := acc.Container.ExecAsSA(db, "ALTER ROLE [db_datareader] DROP MEMBER [drifter];"); err != nil {
+					if err := acc.Container().ExecAsSA(db, "ALTER ROLE [db_datareader] DROP MEMBER [drifter];"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -171,10 +171,10 @@ func TestAccDatabaseRoleMember_drift(t *testing.T) {
 func TestAccDatabaseRoleMember_alreadyMemberSuggestsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "veteran"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "veteran"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "ALTER ROLE [db_ddladmin] ADD MEMBER [veteran];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "ALTER ROLE [db_ddladmin] ADD MEMBER [veteran];"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,10 +194,10 @@ func TestAccDatabaseRoleMember_alreadyMemberSuggestsImport(t *testing.T) {
 func TestAccDatabaseRoleMember_importExisting(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "imported"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "imported"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "ALTER ROLE [db_backupoperator] ADD MEMBER [imported];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "ALTER ROLE [db_backupoperator] ADD MEMBER [imported];"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := memberConfig(db, "db_backupoperator", "imported")
@@ -256,10 +256,10 @@ func TestAccDatabaseRoleMember_escapedImportID(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabaseWithName(t, "acc/slash%")
 	member := "team/alpha%1"
-	if err := acc.Container.CreateUserWithoutLogin(db, member); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, member); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "ALTER ROLE [db_datareader] ADD MEMBER [team/alpha%1];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "ALTER ROLE [db_datareader] ADD MEMBER [team/alpha%1];"); err != nil {
 		t.Fatal(err)
 	}
 	id := azuresql.RoleMemberID(db, "db_datareader", member)
@@ -295,12 +295,12 @@ func TestAccDatabaseRoleMember_escapedImportID(t *testing.T) {
 func TestAccDatabaseRoleMember_hostileMemberNames(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "victim"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "victim"); err != nil {
 		t.Fatal(err)
 	}
 	for _, member := range []string{"we]ird", "o'brien; --", "x]]; DROP USER victim; --"} {
 		t.Run(member, func(t *testing.T) {
-			if err := acc.Container.CreateUserWithoutLogin(db, member); err != nil {
+			if err := acc.Container().CreateUserWithoutLogin(db, member); err != nil {
 				t.Fatal(err)
 			}
 			resource.Test(t, resource.TestCase{
@@ -312,7 +312,7 @@ func TestAccDatabaseRoleMember_hostileMemberNames(t *testing.T) {
 					Check:           memberCheck(db, "db_datareader", member, true),
 				}},
 			})
-			if exists, err := acc.Container.UserExists(db, "victim"); err != nil || !exists {
+			if exists, err := acc.Container().UserExists(db, "victim"); err != nil || !exists {
 				t.Errorf("the user %q was dropped through %q (exists=%v, err=%v)", "victim", member, exists, err)
 			}
 		})
@@ -330,7 +330,7 @@ func TestAccDatabaseRoleMember_missingUserReportsEngineError(t *testing.T) {
 			ExpectError:     regexp.MustCompile(`(?s)Cannot add.*nobody`),
 		}},
 	})
-	if exists, err := acc.Container.UserExists(db, "nobody"); err != nil || exists {
+	if exists, err := acc.Container().UserExists(db, "nobody"); err != nil || exists {
 		t.Errorf("the provider created the missing user (exists=%v, err=%v)", exists, err)
 	}
 }

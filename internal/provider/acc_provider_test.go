@@ -23,7 +23,7 @@ import (
 func TestAccProvider_connects(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "smoke"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "smoke"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,7 +201,7 @@ data "conative_azuresql_database_users" "all" {
 
 	// Terraform rewraps diagnostics, so the messages themselves are read from the
 	// provider protocol.
-	text := readDataSourceDiagnostics(t, acc.Server, acc.WrongToken, "conative_azuresql_database_users", map[string]tftypes.Value{
+	text := readDataSourceDiagnostics(t, acc.Server(), acc.WrongToken, "conative_azuresql_database_users", map[string]tftypes.Value{
 		"database": tftypes.NewValue(tftypes.String, db),
 	})
 	if !strings.Contains(text, "Login failed") {
@@ -379,7 +379,7 @@ data "conative_azuresql_database_users" "all" {
 func TestAccProvider_connectionFailureKeepsState(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "stays"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "stays"); err != nil {
 		t.Fatal(err)
 	}
 	proxy, err := acc.NewProxy()
@@ -488,11 +488,11 @@ func TestAccProvider_tokenNotInStateOrPlan(t *testing.T) {
 	t.Setenv("TF_ACC_TEMP_DIR", dir)
 	db := newDatabase(t)
 	for _, n := range []string{"holder", "imported"} {
-		if err := acc.Container.CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := acc.Container.CreateUserWithoutLogin(db, "viewer"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	var files, plans int
@@ -576,7 +576,7 @@ data "conative_azuresql_database_users" "all" {
 func TestAccProvider_tokenNotInLogs(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "logged"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "logged"); err != nil {
 		t.Fatal(err)
 	}
 	logPath := acctest.EnableTraceLogs(t, t.TempDir())

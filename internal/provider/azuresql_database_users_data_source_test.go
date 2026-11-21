@@ -23,7 +23,7 @@ func TestAccDatabaseUsersDataSource_listsOrderedWithoutBuiltIns(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	for _, n := range []string{"zeta", "alpha", "mid"} {
-		if err := acc.Container.CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -51,7 +51,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	for _, n := range []string{"app", "app2", "APP-other"} {
-		if err := acc.Container.CreateUserWithoutLogin(db, n); err != nil {
+		if err := acc.Container().CreateUserWithoutLogin(db, n); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -78,7 +78,7 @@ func TestAccDatabaseUsersDataSource_nameFilterIsExact(t *testing.T) {
 func TestAccDatabaseUsersDataSource_principalTypeFilter(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "sqluser"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "sqluser"); err != nil {
 		t.Fatal(err)
 	}
 	resource.Test(t, resource.TestCase{
@@ -132,7 +132,7 @@ func TestAccDatabaseUsersDataSource_emptyDatabase(t *testing.T) {
 func TestAccDatabaseUsersDataSource_namesAreNotInterpolated(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "safe"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "safe"); err != nil {
 		t.Fatal(err)
 	}
 	resource.Test(t, resource.TestCase{

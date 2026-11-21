@@ -36,7 +36,7 @@ resource "conative_azuresql_database_permission" "p" {
 // reportedState reads the state code the engine holds for a permission, "" for none.
 func reportedState(db string, p azuresql.Permission) (string, error) {
 	query, args := azuresql.PermissionQuery(p)
-	s, err := acc.Container.QueryStringAsSA(db, query, args...)
+	s, err := acc.Container().QueryStringAsSA(db, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -59,7 +59,7 @@ func permissionCheck(db string, p azuresql.Permission, want string) resource.Tes
 // permissionRows lists "CLASS:PERMISSION:STATE" for everything a principal holds, so a
 // test can prove that nothing besides the declared permission changed.
 func permissionRows(db, principal string) (string, error) {
-	conn, err := acc.Container.SA(db)
+	conn, err := acc.Container().SA(db)
 	if err != nil {
 		return "", err
 	}
@@ -85,7 +85,7 @@ func permissionRows(db, principal string) (string, error) {
 func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "reader"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "reader"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "reader", Permission: "VIEW DEFINITION"}
@@ -144,10 +144,10 @@ func TestAccDatabasePermission_databaseLevel(t *testing.T) {
 func TestAccDatabasePermission_schemaLevelDeny(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "analyst"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "analyst"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "CREATE SCHEMA [sales];", "CREATE SCHEMA [hr];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [sales];", "CREATE SCHEMA [hr];"); err != nil {
 		t.Fatal(err)
 	}
 	sales := azuresql.Permission{Principal: "analyst", Permission: "SELECT", Schema: "sales"}
@@ -213,7 +213,7 @@ func TestAccDatabasePermission_rejectsInvalidPermissions(t *testing.T) {
 func TestAccDatabasePermission_driftRevokedOutsideTerraform(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "drifter"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "drifter"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "drifter", Permission: "VIEW DEFINITION"}
@@ -229,7 +229,7 @@ func TestAccDatabasePermission_driftRevokedOutsideTerraform(t *testing.T) {
 			},
 			{
 				PreConfig: func() {
-					if err := acc.Container.ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [drifter];"); err != nil {
+					if err := acc.Container().ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [drifter];"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -247,7 +247,7 @@ func TestAccDatabasePermission_driftRevokedOutsideTerraform(t *testing.T) {
 func TestAccDatabasePermission_driftChangedToDeny(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "flipper"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "flipper"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "flipper", Permission: "VIEW DEFINITION"}
@@ -263,7 +263,7 @@ func TestAccDatabasePermission_driftChangedToDeny(t *testing.T) {
 			},
 			{
 				PreConfig: func() {
-					if err := acc.Container.ExecAsSA(db, "DENY VIEW DEFINITION TO [flipper];"); err != nil {
+					if err := acc.Container().ExecAsSA(db, "DENY VIEW DEFINITION TO [flipper];"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -284,7 +284,7 @@ func TestAccDatabasePermission_driftChangedToDeny(t *testing.T) {
 func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "grantor"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "grantor"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "grantor", Permission: "VIEW DEFINITION"}
@@ -297,7 +297,7 @@ func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 			{ConfigVariables: tokenVariables(), Config: cfg, Check: permissionCheck(db, p, "G")},
 			{
 				PreConfig: func() {
-					if err := acc.Container.ExecAsSA(db, "GRANT VIEW DEFINITION TO [grantor] WITH GRANT OPTION;"); err != nil {
+					if err := acc.Container().ExecAsSA(db, "GRANT VIEW DEFINITION TO [grantor] WITH GRANT OPTION;"); err != nil {
 						t.Fatal(err)
 					}
 				},
@@ -320,7 +320,7 @@ func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 					if got, err := reportedState(db, p); err != nil || got != "W" {
 						t.Errorf("the grant option was changed by the failed replacement: %q (%v)", got, err)
 					}
-					if err := acc.Container.ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [grantor] CASCADE;"); err != nil {
+					if err := acc.Container().ExecAsSA(db, "REVOKE VIEW DEFINITION FROM [grantor] CASCADE;"); err != nil {
 						t.Errorf("cannot remove the grant option: %v", err)
 					}
 				},
@@ -336,10 +336,10 @@ func TestAccDatabasePermission_driftGrantOption(t *testing.T) {
 func TestAccDatabasePermission_existingPermissionSuggestsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "holder"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "holder"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "DENY SELECT TO [holder];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "DENY SELECT TO [holder];"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,7 +361,7 @@ func TestAccDatabasePermission_existingPermissionSuggestsImport(t *testing.T) {
 func TestAccDatabasePermission_implicitConnectNeedsImport(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "fresh"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "fresh"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: "fresh", Permission: "CONNECT"}
@@ -392,10 +392,10 @@ func TestAccDatabasePermission_implicitConnectNeedsImport(t *testing.T) {
 func TestAccDatabasePermission_importBothForms(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
-	if err := acc.Container.CreateUserWithoutLogin(db, "importer"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "importer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.ExecAsSA(db, "CREATE SCHEMA [sales];", "GRANT VIEW DEFINITION TO [importer];", "DENY SELECT ON SCHEMA::[sales] TO [importer];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [sales];", "GRANT VIEW DEFINITION TO [importer];", "DENY SELECT ON SCHEMA::[sales] TO [importer];"); err != nil {
 		t.Fatal(err)
 	}
 	dbLevel := azuresql.Permission{Principal: "importer", Permission: "VIEW DEFINITION"}
@@ -462,14 +462,14 @@ func TestAccDatabasePermission_hostileNames(t *testing.T) {
 	accPreCheck(t)
 	db := newDatabase(t)
 	hostile := "we]ird'; DROP USER victim; --"
-	if err := acc.Container.CreateUserWithoutLogin(db, "victim"); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, "victim"); err != nil {
 		t.Fatal(err)
 	}
-	if err := acc.Container.CreateUserWithoutLogin(db, hostile); err != nil {
+	if err := acc.Container().CreateUserWithoutLogin(db, hostile); err != nil {
 		t.Fatal(err)
 	}
 	schemaName := "s]chema'; --"
-	if err := acc.Container.ExecAsSA(db, "CREATE SCHEMA [s]]chema'; --];"); err != nil {
+	if err := acc.Container().ExecAsSA(db, "CREATE SCHEMA [s]]chema'; --];"); err != nil {
 		t.Fatal(err)
 	}
 	p := azuresql.Permission{Principal: hostile, Permission: "SELECT", Schema: schemaName}
@@ -483,7 +483,7 @@ func TestAccDatabasePermission_hostileNames(t *testing.T) {
 			Check:           permissionCheck(db, p, "G"),
 		}},
 	})
-	if exists, err := acc.Container.UserExists(db, "victim"); err != nil || !exists {
+	if exists, err := acc.Container().UserExists(db, "victim"); err != nil || !exists {
 		t.Errorf("the user victim was dropped (exists=%v, err=%v)", exists, err)
 	}
 }
@@ -499,7 +499,7 @@ func TestAccDatabasePermission_missingPrincipalReportsEngineError(t *testing.T) 
 			ExpectError:     regexp.MustCompile(`(?s)Cannot set.*ghost`),
 		}},
 	})
-	if exists, err := acc.Container.UserExists(db, "ghost"); err != nil || exists {
+	if exists, err := acc.Container().UserExists(db, "ghost"); err != nil || exists {
 		t.Errorf("the provider created the missing principal (exists=%v, err=%v)", exists, err)
 	}
 }
@@ -508,7 +508,7 @@ func TestAccDatabasePermission_missingPrincipalReportsEngineError(t *testing.T) 
 // A newer engine may know more names than the lists hold.
 func TestAccPermissionAllowlistKnownToEngine(t *testing.T) {
 	accPreCheck(t)
-	conn, err := acc.Container.SA("master")
+	conn, err := acc.Container().SA("master")
 	if err != nil {
 		t.Fatal(err)
 	}

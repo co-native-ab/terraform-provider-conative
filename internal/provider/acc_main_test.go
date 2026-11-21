@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -14,8 +13,8 @@ import (
 	"github.com/co-native-ab/terraform-provider-conative/internal/acctest"
 )
 
-// acc is the acceptance environment: a SQL Server container behind a sign-in proxy.
-// It is nil unless TF_ACC is set.
+// acc is the acceptance environment: the fakes of the ACME area and, started on first
+// use, a SQL Server container behind a sign-in proxy. It is nil unless TF_ACC is set.
 var acc *acctest.Env
 
 func TestMain(m *testing.M) {
@@ -23,9 +22,7 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	env, err := acctest.SetupEnv(ctx)
-	cancel()
+	env, err := acctest.SetupEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot set up the acceptance environment: %v\n", err)
 		os.Exit(1)
@@ -43,7 +40,7 @@ var databaseCounter atomic.Int64
 func newDatabase(t *testing.T) string {
 	t.Helper()
 	name := fmt.Sprintf("acc_%d_%d", time.Now().UnixNano()%1_000_000, databaseCounter.Add(1))
-	if err := acc.Container.CreateDatabase(name); err != nil {
+	if err := acc.Container().CreateDatabase(name); err != nil {
 		t.Fatalf("cannot create database %s: %v", name, err)
 	}
 	return name
@@ -54,7 +51,7 @@ func newDatabase(t *testing.T) string {
 func newDatabaseWithName(t *testing.T, prefix string) string {
 	t.Helper()
 	name := fmt.Sprintf("%s_%d", prefix, databaseCounter.Add(1))
-	if err := acc.Container.CreateDatabase(name); err != nil {
+	if err := acc.Container().CreateDatabase(name); err != nil {
 		t.Fatalf("cannot create database %s: %v", name, err)
 	}
 	return name
@@ -68,7 +65,7 @@ func tokenVariables() config.Variables {
 
 // providerConfig is the provider block every acceptance configuration starts with.
 // The token comes from an ephemeral, sensitive variable, as it would in practice.
-func providerConfig() string { return providerConfigFor(acc.Server, "") }
+func providerConfig() string { return providerConfigFor(acc.Server(), "") }
 
 func providerConfigFor(server, extra string) string {
 	return fmt.Sprintf(`
