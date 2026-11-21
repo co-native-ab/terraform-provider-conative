@@ -235,7 +235,7 @@ func (r *databasePermissionResource) Read(ctx context.Context, req resource.Read
 		return
 	}
 	state.State = types.StringValue(reported)
-	state.ID = types.StringValue(azuresql.PermissionID(database, p.Principal, reported, p.Permission, p.Schema))
+	state.ID = types.StringValue(azuresql.PermissionID(database, p.Principal, existingImportState(reported), p.Permission, p.Schema))
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
