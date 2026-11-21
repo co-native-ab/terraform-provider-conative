@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file. The format is b
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0.0, an incompatible change
 bumps the minor version.
 
+## 0.2.3 (2026-11-21)
+
+### Changed
+
+- Documentation: the permissions for an order are narrower. A test against Azure, with an identity that held
+  exactly the documented data actions and with each one removed in turn, showed that Key Vault authorises
+  every request to the pending-operation endpoint (`/certificates/<name>/pending`), whether it reads it,
+  deletes a finished record, cancels or deletes an operation in progress, or merges the issued chain, as
+  `certificates/create/action` alone. `certificates/update/action` and `certificates/delete` are neither
+  needed nor sufficient for it, and are no longer listed for an order. Ordering and renewing need
+  `certificates/read` and `certificates/create/action` on the certificate and `keys/read` and
+  `keys/sign/action` on the account key. Identities that hold the wider 0.2.2 set keep working.
+- The Key Vault test double requires only `certificates/create/action` for every request to a pending
+  operation, as Key Vault does. The acceptance tests run an order with exactly the narrower set, show that
+  an order succeeds without `certificates/update/action` and `certificates/delete`, and run a destroy with
+  `revoke_on_destroy = true` with exactly the data actions the guide lists for it.
+
+### Fixed
+
+- Documentation: destroy with `revoke_on_destroy = true` also needs `keys/read` on the account key, which
+  the 0.2.2 documentation omitted; without it the destroy fails with a 403 that names it.
+- Documentation: with `dns_propagation_check = false`, validation can race DNS propagation and an apply can
+  fail because the challenge record is not served yet; the guide now says so and suggests running the apply
+  again.
+- Documentation: the guide's section on how consumers pick up a new version records the delays observed in
+  one deployment for Azure Container Apps (minutes) and Azure Front Door (hours, skipping an intermediate
+  version).
+
 ## 0.2.2 (2026-11-21)
 
 ### Fixed

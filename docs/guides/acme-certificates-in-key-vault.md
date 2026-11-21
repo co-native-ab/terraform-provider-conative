@@ -120,8 +120,11 @@ provider "conative" {
 ```
 
 With the check off the provider still waits five seconds after it has written the records and then lets the
-certificate authority validate them, which is where the validation happens anyway. A record that is not
-served yet then fails the validation and therefore the apply, which can be repeated.
+certificate authority validate them, which is where the validation happens anyway. Validation then races DNS
+propagation: if a name server of the zone does not serve the record yet when the authority queries it, the
+validation fails (for example with "No TXT record found") and so does the apply. This does happen, also with
+a provider such as Cloudflare that usually serves records within seconds. Run the apply again; it orders
+anew. A pipeline that runs with the check off should expect an occasional failure of this kind and retry.
 
 ## A registration and a certificate
 
@@ -294,12 +297,14 @@ A new version in Key Vault does not reach every consumer at once; the delay is t
 provider's, and it is set by each service. Two examples:
 
 - Azure Container Apps environments that reference the certificate through its versionless Key Vault ID
-  picked up a new version within minutes in practice. Microsoft documents that it
+  picked up a new version within minutes in practice (about two minutes in one deployment). Microsoft documents that it
   [can take up to 12 hours](https://learn.microsoft.com/azure/container-apps/key-vault-certificates-manage#rotate-certificates).
 - Azure Front Door with the certificate version set to "Latest" rotates on its own schedule, which can take
   hours or longer. Microsoft documents that a customer certificate
   [rotates within 3-4 days](https://learn.microsoft.com/azure/frontdoor/end-to-end-tls#certificate-autorotation)
-  of a new version.
+  of a new version. In one deployment, Front Door served a new version about three and a half hours after
+  the renewal. It does not necessarily serve every version: there, it went straight to the latest version and
+  skipped one that had been created in between.
 
 Other services differ again, so check how yours follows a Key Vault certificate. Renewing with enough margin,
 that is, a `min_days_remaining` well above the slowest consumer's delay, covers it: the old version stays
@@ -445,27 +450,30 @@ Key Vault data actions (Azure RBAC) for each operation:
 | Refresh, import and plan of a certificate | `Microsoft.KeyVault/vaults/certificates/read` (get, list versions) | none |
 | Plan when an order is due | `certificates/read` only, as above | Azure DNS: `Microsoft.Network/dnsZones/read` with the Resource Manager token, for each `azure_dns` block that serves a name of the order; Cloudflare: *Zone: Zone: Read* for each `cloudflare` block that serves one. The plan only reads, and fails with a clear error if it cannot read the zone. |
 | Create a registration, change its `email`, import a registration | `keys/read` and `Microsoft.KeyVault/vaults/keys/sign/action` on the account key | the certificate authority |
-| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version, reading the pending operation and merging the issued chain), `certificates/update/action` and `certificates/delete` (deleting a pending operation: a finished record or a cancelled leftover; see below), and `keys/read` and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
-| Destroy with `revoke_on_destroy = true` | `certificates/read`, `certificates/delete`, `keys/sign/action` | the certificate authority |
+| Order or renew a certificate | `certificates/read`, `certificates/create/action` (creating the pending version and every request to the pending operation: reading it, deleting a finished record or a leftover operation, and merging the issued chain; see below), and `keys/read` and `keys/sign/action` on the account key | Azure DNS: `Microsoft.Network/dnsZones/read`, `Microsoft.Network/dnsZones/TXT/read`, `.../TXT/write`, `.../TXT/delete`; Cloudflare: *Zone: Zone: Read* and *Zone: DNS: Edit* |
+| Destroy with `revoke_on_destroy = true` | `certificates/read`, `certificates/delete`, and `keys/read` and `keys/sign/action` on the account key | the certificate authority |
 | Destroy with `revoke_on_destroy = false` | `certificates/delete` | none |
 
-The pending-operation endpoint (`/certificates/<name>/pending`) needs `certificates/create/action` even to
-read it, although Microsoft's REST reference names the get permission for
-[reading a pending operation](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/get-certificate-operation/get-certificate-operation),
-so the provider uses it only at apply; plan and refresh never call it. For
-[deleting a pending operation](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/delete-certificate-operation/delete-certificate-operation)
-the REST reference names the update permission, but which data action Key Vault checks is not documented. An
-order therefore lists every candidate, `certificates/create/action`, `certificates/update/action` and
-`certificates/delete`, so that it works whichever Key Vault asks for. An order never deletes the Key Vault
-certificate itself. *Key Vault Certificates Officer* grants all of them.
+Key Vault authorises every request to the pending-operation endpoint (`/certificates/<name>/pending`),
+including reading it, deleting it, cancelling it and merging the issued chain, as
+`certificates/create/action`. Microsoft's REST reference names the get permission for
+[reading a pending operation](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/get-certificate-operation/get-certificate-operation)
+and the update permission for
+[deleting one](https://learn.microsoft.com/en-us/rest/api/keyvault/certificates/delete-certificate-operation/delete-certificate-operation),
+but with Azure RBAC Key Vault checks `certificates/create/action`, and `certificates/update/action` or
+`certificates/delete` neither replace nor add to it; this was verified against Azure with an identity that held
+exactly the data actions of the order row. Because even reading the pending operation is a create right, the
+provider reads it only at apply; plan and refresh never call it. An order never deletes the Key Vault
+certificate itself. *Key Vault Certificates Officer* grants all of these.
 
 For example, *Key Vault Reader* (metadata only) for plans, or for apply *Key Vault Certificates Officer*,
 which covers every certificate data action above, and *Key Vault Crypto User* for `keys/read` and
 `keys/sign/action` on the account key. Rights for refresh and plan are a strict subset of those for apply, so
 a pipeline can run plans with a read-only identity and applies with a writing one. The merge needs only
 `certificates/create/action`; it does not need the `import` data action. The certificate's own key needs no
-key permission. With access policies instead of RBAC, the equivalent are the certificate permissions `get`,
-`list`, `create`, `update` and `delete`, and the key permissions `get` and `sign`. A plan in which an order is
+key permission. With access policies instead of RBAC, grant the certificate permissions `get`, `list`,
+`create`, `update` and `delete` and the key permissions `get` and `sign`; the narrower set in the table was
+verified with Azure RBAC only. A plan in which an order is
 due also needs, for the DNS side, only read access to the zones, as the table shows.
 
 Azure DNS: for each `azure_dns` block, read the zone and read, write and delete TXT record sets, for example

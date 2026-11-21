@@ -17,12 +17,19 @@ import (
 
 // documentedOrderActions are exactly the Key Vault data actions that the guide lists for
 // "Order or renew a certificate". The acceptance tests below run an order with no other
-// right, and TestGuideListsTheOrderActions checks the guide against this list, so the
+// right, and TestGuideListsTheDocumentedActions checks the guide against this list, so the
 // documentation and the behaviour cannot drift apart.
 var documentedOrderActions = []string{
 	keyvaultfake.ActionCertificatesRead,
 	keyvaultfake.ActionCertificatesCreate,
-	keyvaultfake.ActionCertificatesUpdate,
+	keyvaultfake.ActionKeysRead,
+	keyvaultfake.ActionKeysSign,
+}
+
+// documentedRevokeDestroyActions are exactly the Key Vault data actions that the guide
+// lists for "Destroy with `revoke_on_destroy = true`".
+var documentedRevokeDestroyActions = []string{
+	keyvaultfake.ActionCertificatesRead,
 	keyvaultfake.ActionCertificatesDelete,
 	keyvaultfake.ActionKeysRead,
 	keyvaultfake.ActionKeysSign,
@@ -61,30 +68,35 @@ func guideRowActions(t *testing.T, guide, operation string) []string {
 	return nil
 }
 
-func TestGuideListsTheOrderActions(t *testing.T) {
+func TestGuideListsTheDocumentedActions(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("../../docs/guides/acme-certificates-in-key-vault.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := guideRowActions(t, string(raw), "Order or renew a certificate")
-	var want []string
-	for _, a := range documentedOrderActions {
-		want = append(want, shortAction(a))
-	}
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Errorf("the guide lists %v for \"Order or renew a certificate\", the acceptance tests grant %v", got, want)
+	for operation, actions := range map[string][]string{
+		"Order or renew a certificate":            documentedOrderActions,
+		"Destroy with `revoke_on_destroy = true`": documentedRevokeDestroyActions,
+	} {
+		got := guideRowActions(t, string(raw), operation)
+		var want []string
+		for _, a := range actions {
+			want = append(want, shortAction(a))
+		}
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("the guide lists %v for %q, the acceptance tests grant %v", got, operation, want)
+		}
 	}
 }
 
 // The documented rights are enough for an order that has to clear a pending operation:
 // a finished record that Key Vault keeps, and an operation in progress that a failed run
-// left behind. The fake demands certificates/create/action, certificates/update/action and
-// certificates/delete for deleting a pending operation, so a guide that drops any of them
-// fails here.
+// left behind. As in Key Vault, the fake authorises every request to the pending operation,
+// deleting it included, as certificates/create/action alone.
 func TestAccACMECertificate_orderWithDocumentedRights(t *testing.T) {
 	accPreCheck(t)
+	t.Cleanup(acc.KeyVault.GrantAll)
 	f := newACMEFixture(t, "P256")
 	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 	finished := tweaks
@@ -165,15 +177,9 @@ func TestAccACMECertificate_orderWithDocumentedRights(t *testing.T) {
 // documented set has no right to spare.
 func TestAccACMECertificate_orderNeedsEveryDocumentedRight(t *testing.T) {
 	accPreCheck(t)
-	for _, missing := range []string{
-		keyvaultfake.ActionCertificatesRead,
-		keyvaultfake.ActionCertificatesUpdate,
-		keyvaultfake.ActionCertificatesDelete,
-		keyvaultfake.ActionCertificatesCreate,
-		keyvaultfake.ActionKeysSign,
-		keyvaultfake.ActionKeysRead,
-	} {
+	for _, missing := range documentedOrderActions {
 		t.Run("without "+shortAction(missing), func(t *testing.T) {
+			t.Cleanup(acc.KeyVault.GrantAll)
 			f := newACMEFixture(t, "P256")
 			tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
 			renew := tweaks
@@ -195,4 +201,130 @@ func TestAccACMECertificate_orderNeedsEveryDocumentedRight(t *testing.T) {
 			})
 		})
 	}
+}
+
+// certificates/update/action and certificates/delete are not needed for an order, not even
+// to clear a finished record or cancel a leftover operation: Key Vault authorises the
+// pending-operation endpoint as certificates/create/action alone. An order with neither
+// of them, on top of the documented set, succeeds and deletes the pending operation.
+func TestAccACMECertificate_orderNeedsNoUpdateOrDeleteRight(t *testing.T) {
+	accPreCheck(t)
+	t.Cleanup(acc.KeyVault.GrantAll)
+	for _, granted := range documentedOrderActions {
+		if granted == keyvaultfake.ActionCertificatesUpdate || granted == keyvaultfake.ActionCertificatesDelete {
+			t.Fatalf("the documented order set lists %s", shortAction(granted))
+		}
+	}
+	f := newACMEFixture(t, "P256")
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly}
+	renew := tweaks
+	renew.MinDays = 100
+	var kvMark, forbidden int
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: newTestProviderFactories(),
+		Steps: []resource.TestStep{
+			{ConfigVariables: acmeVariables(), Config: f.config(tweaks)},
+			{
+				PreConfig: func() {
+					acc.ACME.SetValidity(365 * 24 * time.Hour)
+					acc.KeyVault.SetDataActions(documentedOrderActions...)
+					acc.KeyVault.AddPendingOperation(f.Cert, "Unknown")
+					kvMark = acc.KeyVault.Journal.Mark()
+					forbidden = acc.KeyVault.ForbiddenMark()
+				},
+				ConfigVariables: acmeVariables(), Config: f.config(renew),
+				Check: func(*terraform.State) error {
+					if got := acc.KeyVault.ForbiddenSince(forbidden); len(got) != 0 {
+						return fmt.Errorf("Key Vault refused requests without update/action and delete: %v", got)
+					}
+					for _, e := range acc.KeyVault.Journal.Since(kvMark) {
+						if e.Method == "DELETE" && strings.HasSuffix(e.Path, "/certificates/"+f.Cert+"/pending") {
+							return nil
+						}
+					}
+					return fmt.Errorf("the pending operation was not deleted")
+				},
+			},
+			{PreConfig: acc.KeyVault.GrantAll, ConfigVariables: acmeVariables(), Config: f.config(renew), PlanOnly: true},
+		},
+	})
+}
+
+// Destroy with revoke_on_destroy = true works with exactly the documented rights, and
+// fails without keys/read: the account key is read to sign the revocation (and, in this
+// configuration, already by the refresh of the registration that precedes the destroy).
+func TestAccACMECertificate_revokeDestroyWithDocumentedRights(t *testing.T) {
+	accPreCheck(t)
+	tweaks := certOptions{SANs: []string{"*.example.com"}, Blocks: cloudflareOnly, Revoke: "true"}
+
+	t.Run("documented rights", func(t *testing.T) {
+		t.Cleanup(acc.KeyVault.GrantAll)
+		// The rights are narrowed after the apply, so that the final destroy runs with
+		// exactly the documented set.
+		f := newACMEFixture(t, "P256")
+		var serial string
+		var forbidden int
+		resource.Test(t, resource.TestCase{
+			ProtoV6ProviderFactories: newTestProviderFactories(),
+			CheckDestroy: func(*terraform.State) error {
+				acc.KeyVault.GrantAll()
+				if got := acc.KeyVault.ForbiddenSince(forbidden); len(got) != 0 {
+					return fmt.Errorf("Key Vault refused requests with the documented rights: %v", got)
+				}
+				if !slices.Contains(acc.ACME.Revoked(), serial) {
+					return fmt.Errorf("serial %s was not revoked", serial)
+				}
+				if !acc.KeyVault.Deleted(f.Cert) {
+					return fmt.Errorf("the certificate was not deleted")
+				}
+				return nil
+			},
+			Steps: []resource.TestStep{{
+				ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+				Check: func(st *terraform.State) (err error) {
+					if serial, err = serialOf(st); err != nil {
+						return err
+					}
+					acc.KeyVault.SetDataActions(documentedRevokeDestroyActions...)
+					forbidden = acc.KeyVault.ForbiddenMark()
+					return nil
+				},
+			}},
+		})
+	})
+
+	t.Run("without keys/read", func(t *testing.T) {
+		t.Cleanup(acc.KeyVault.GrantAll)
+		f := newACMEFixture(t, "P256")
+		var serial string
+		resource.Test(t, resource.TestCase{
+			ProtoV6ProviderFactories: newTestProviderFactories(),
+			Steps: []resource.TestStep{
+				{
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+					Check: func(st *terraform.State) (err error) { serial, err = serialOf(st); return err },
+				},
+				{
+					PreConfig: func() {
+						acc.KeyVault.SetDataActions(without(documentedRevokeDestroyActions, keyvaultfake.ActionKeysRead)...)
+					},
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks),
+					Destroy:     true,
+					ExpectError: regexp.MustCompile(`(?s)keys\s*/\s*read`),
+				},
+				{
+					PreConfig: func() {
+						acc.KeyVault.GrantAll()
+						if slices.Contains(acc.ACME.Revoked(), serial) {
+							t.Errorf("serial %s was revoked although destroy failed", serial)
+						}
+						if !acc.KeyVault.Exists(f.Cert) {
+							t.Errorf("the certificate was deleted although destroy failed")
+						}
+					},
+					ConfigVariables: acmeVariables(), Config: f.config(tweaks), PlanOnly: true,
+				},
+			},
+		})
+	})
 }

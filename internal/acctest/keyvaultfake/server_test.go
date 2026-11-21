@@ -269,25 +269,21 @@ func TestSetDataActionsGrantsExactlyThose(t *testing.T) {
 		t.Errorf("get pending: %v", err)
 	}
 	var api *keyvault.APIError
-	// Deleting a pending operation needs create/action, update/action and delete; the
-	// refusal names the first one that is missing.
-	all := []string{keyvaultfake.ActionCertificatesCreate, keyvaultfake.ActionCertificatesUpdate, keyvaultfake.ActionCertificatesDelete}
-	for _, missing := range all {
-		var granted []string
-		for _, a := range all {
-			if a != missing {
-				granted = append(granted, a)
-			}
-		}
-		srv.SetDataActions(granted...)
-		if err := c.DeletePending(ctx, "p"); !errors.As(err, &api) || api.Status != http.StatusForbidden ||
-			!strings.Contains(api.Message, "Action: '"+missing+"'") {
-			t.Errorf("delete pending without %s: %v", missing, err)
-		}
+	// Every request to a pending operation, deleting it included, needs
+	// certificates/create/action and nothing else, as in Key Vault: update/action and
+	// delete neither replace nor add to it.
+	srv.SetDataActions(keyvaultfake.ActionCertificatesRead, keyvaultfake.ActionCertificatesUpdate, keyvaultfake.ActionCertificatesDelete)
+	if err := c.DeletePending(ctx, "p"); !errors.As(err, &api) || api.Status != http.StatusForbidden ||
+		!strings.Contains(api.Message, "Action: '"+keyvaultfake.ActionCertificatesCreate+"'") {
+		t.Errorf("delete pending without create/action: %v", err)
 	}
-	srv.SetDataActions(all...)
+	if _, err := c.GetPending(ctx, "p"); !errors.As(err, &api) || api.Status != http.StatusForbidden ||
+		!strings.Contains(api.Message, "Action: '"+keyvaultfake.ActionCertificatesCreate+"'") {
+		t.Errorf("get pending without create/action: %v", err)
+	}
+	srv.SetDataActions(keyvaultfake.ActionCertificatesCreate)
 	if err := c.DeletePending(ctx, "p"); err != nil {
-		t.Errorf("delete pending with all three: %v", err)
+		t.Errorf("delete pending with create/action alone: %v", err)
 	}
 	srv.SetDataActions(keyvaultfake.ActionCertificatesRead, keyvaultfake.ActionCertificatesCreate)
 	if _, err := c.Sign(ctx, "k", "v", "ES256", make([]byte, 32)); !errors.As(err, &api) || api.Status != http.StatusForbidden {
