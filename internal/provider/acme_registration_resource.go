@@ -18,6 +18,7 @@ import (
 
 	"github.com/co-native-ab/terraform-provider-conative/internal/acme"
 	"github.com/co-native-ab/terraform-provider-conative/internal/acme/issuer"
+	"github.com/co-native-ab/terraform-provider-conative/internal/acme/keyvault"
 )
 
 var (
@@ -52,6 +53,8 @@ func (r *acmeRegistrationResource) Schema(_ context.Context, _ resource.SchemaRe
 		MarkdownDescription: "An account with an ACME certificate authority whose key is a Key Vault key. " +
 			"Every request to the authority is signed by Key Vault; the private key never leaves it. " +
 			"If the authority already has an account for the key, that account is used. " +
+			"Refreshing and planning never sign anything and never contact the authority: they only read the " +
+			"key's metadata from Key Vault. Creating, updating the email and importing sign. " +
 			"Creating an account agrees to the authority's terms of service. " +
 			"Destroying the resource does not deactivate the account.",
 		Attributes: map[string]schema.Attribute{
@@ -64,16 +67,20 @@ func (r *acmeRegistrationResource) Schema(_ context.Context, _ resource.SchemaRe
 				PlanModifiers: replace,
 			},
 			"account_key_id": schema.StringAttribute{
-				MarkdownDescription: "The versioned ID of an existing Key Vault key, RSA (2048 bits or more) or EC " +
-					"(P-256, P-384 or P-521), with the `sign` operation permitted. Whether the key is exportable " +
-					"does not matter. Changing it replaces the registration.",
+				MarkdownDescription: "The versioned ID of an existing Key Vault key (`https://<name>.vault.azure.net/keys/<key>/<version>`), " +
+					"RSA (2048 bits or more) or EC (P-256, P-384 or P-521), with the `sign` operation permitted. " +
+					"Whether the key is exportable does not matter. Some authorities do not accept every key: " +
+					"Let's Encrypt, for example, does not accept P-521 account keys. Changing it replaces the " +
+					"registration.",
 				Required:      true,
 				Validators:    []validator.String{checkString("must be a versioned Key Vault key ID", validateKeyID)},
 				PlanModifiers: replace,
 			},
 			"email": schema.StringAttribute{
-				MarkdownDescription: "A contact address for the account. Setting or changing it updates the account. " +
-					"Removing it stops managing the contact; the authority keeps the last address.",
+				MarkdownDescription: "A contact address for the account. Setting or changing it updates the account (which signs " +
+					"a request with the account key). Removing it stops managing the contact; the authority keeps the " +
+					"last address. Some certificate authorities, Let's Encrypt among them, do not report or store an " +
+					"account's contact address, so it cannot be read back: Terraform keeps the configured value.",
 				Optional:   true,
 				Validators: []validator.String{checkString("must be an e-mail address", acme.ValidateEmail)},
 			},
@@ -139,7 +146,9 @@ func (r *acmeRegistrationResource) Create(ctx context.Context, req resource.Crea
 	acct, err := issuer.Lookup(ctx, reg)
 	switch {
 	case err == nil:
-		if email != "" && !hasContact(acct.Contact, email) {
+		// Some authorities (Let's Encrypt among them) do not report an account's contacts.
+		// Without a list nothing says the address differs, so nothing is sent.
+		if email != "" && len(acct.Contact) > 0 && !hasContact(acct.Contact, email) {
 			acct, err = issuer.UpdateContact(ctx, reg, acct.URL, email)
 		}
 	case errors.Is(err, issuer.ErrNoAccount):
@@ -163,34 +172,60 @@ func hasContact(contacts []string, email string) bool {
 	return false
 }
 
+// Read refreshes the registration without signing anything: the account URL is kept from
+// state, and Key Vault is asked only for the key's metadata, to confirm the key still
+// exists. Only a key that Key Vault answers with "not found" removes the registration
+// from state; any other failure is an error and the state is kept. The one exception is
+// the first read after an import, which has to ask the certificate authority for the
+// account and therefore signs.
 func (r *acmeRegistrationResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state acmeRegistrationModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	reg, ok := r.registration(ctx, state, &resp.Diagnostics)
-	if !ok {
+	access := requireACME(r.data, &resp.Diagnostics, false)
+	if access == nil {
 		return
 	}
-	acct, err := issuer.Lookup(ctx, reg)
-	if errors.Is(err, issuer.ErrNoAccount) {
-		resp.State.RemoveResource(ctx)
+	key, err := acme.ParseKeyID(state.AccountKeyID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid account_key_id", err.Error())
 		return
 	}
+	kv, err := access.keyVault(key.Vault)
 	if err != nil {
 		operationError(&resp.Diagnostics, "read", state.object(), err)
 		return
 	}
-	state.AccountURL = types.StringValue(acct.URL)
-	if !state.Email.IsNull() {
-		state.Email = types.StringNull()
-		for _, c := range acct.Contact {
-			if strings.HasPrefix(c, "mailto:") {
-				state.Email = types.StringValue(strings.TrimPrefix(c, "mailto:"))
-				break
-			}
+	tflog.Debug(ctx, "reading acme registration")
+	if _, err := kv.GetKey(ctx, key.Name, key.Version); err != nil {
+		if errors.Is(err, keyvault.ErrNotFound) {
+			resp.State.RemoveResource(ctx)
+			return
 		}
+		operationError(&resp.Diagnostics, "read the account key of", state.object(), err)
+		return
+	}
+
+	if state.AccountURL.IsNull() || state.AccountURL.IsUnknown() {
+		// Import: the account is looked up once, which needs the key to sign.
+		reg, ok := r.registration(ctx, state, &resp.Diagnostics)
+		if !ok {
+			return
+		}
+		acct, err := issuer.Lookup(ctx, reg)
+		if errors.Is(err, issuer.ErrNoAccount) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		if err != nil {
+			operationError(&resp.Diagnostics, "read", state.object(), err)
+			return
+		}
+		// The contact address is not read back: many authorities do not report it. After an
+		// import an email in the configuration is set by the first apply.
+		state.AccountURL = types.StringValue(acct.URL)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
