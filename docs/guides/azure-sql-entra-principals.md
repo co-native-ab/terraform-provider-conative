@@ -17,14 +17,34 @@ uses that token to open connections for the length of the run.
 
 - The token is a sensitive attribute and is never written to state, a plan, a log line or an error
   message, at any log level.
-- Obtain the token outside the provider, for example with the Azure CLI:
+- Any source of such a token works. The recommended one is the
+  [`co-native-ab/azidentity`](https://registry.terraform.io/providers/co-native-ab/azidentity) provider,
+  whose ephemeral resources (`azidentity_default_credential`, `azidentity_azure_cli_credential`,
+  `azidentity_client_secret_credential`, `azidentity_client_assertion_credential`) obtain a fresh token at
+  the start of every run and keep it out of the plan and the state (Terraform 1.10 or later):
+
+  ```terraform
+  ephemeral "azidentity_default_credential" "sql" {
+    scopes = ["https://database.windows.net/.default"]
+  }
+
+  provider "conative" {
+    azuresql = {
+      server       = "example-server.database.windows.net"
+      access_token = ephemeral.azidentity_default_credential.sql.access_token
+    }
+  }
+  ```
+
+- You can also obtain the token outside Terraform, for example with the Azure CLI or as a pipeline
+  variable, and pass it in a variable:
 
   ```shell
   export TF_VAR_sql_token="$(az account get-access-token \
     --resource https://database.windows.net/ --query accessToken --output tsv)"
   ```
 
-- Declare the variable as `ephemeral = true` (Terraform 1.10 or later), so that Terraform does not
+  Declare the variable as `ephemeral = true` (Terraform 1.10 or later), so that Terraform does not
   persist it either. Older Terraform versions work too, but then Terraform itself may keep the value
   in a saved plan.
 - Tokens are short-lived. Obtain a fresh one for each run.
