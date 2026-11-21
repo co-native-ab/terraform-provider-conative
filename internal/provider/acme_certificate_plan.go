@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -32,8 +33,11 @@ type azureBlock struct {
 
 type cloudflareBlock struct {
 	Zone  string
-	Token string // from the configuration only; empty when unknown
-	Block acme.Block
+	Token string // from the configuration only; empty when null or unknown
+	// TokenUnknown is true when the token is not known until apply; an empty Token with
+	// TokenUnknown false means no token was configured.
+	TokenUnknown bool
+	Block        acme.Block
 }
 
 // dnsBlocks are the DNS blocks of a certificate as read from the configuration.
@@ -41,7 +45,8 @@ type dnsBlocks struct {
 	Azure      []azureBlock
 	Cloudflare []cloudflareBlock
 	// Known is true when every value the routing needs (zones and match_domains) is
-	// known; TokensKnown when every Cloudflare token is.
+	// known; TokensKnown when no Cloudflare token is unknown (a token that is not set is
+	// known).
 	Known       bool
 	TokensKnown bool
 }
@@ -128,9 +133,13 @@ func parseDNSBlocks(az, cf types.List) dnsBlocks {
 		zone, ok1 := stringOf(o.Attributes()["zone"])
 		md, ok2 := matchDomainsOf(o)
 		tok, ok3 := stringOf(o.Attributes()["api_token"])
+		unknown := false
+		if v, isString := o.Attributes()["api_token"].(types.String); isString {
+			unknown = v.IsUnknown()
+		}
 		d.Known = d.Known && ok1 && ok2
-		d.TokensKnown = d.TokensKnown && ok3
-		d.Cloudflare = append(d.Cloudflare, cloudflareBlock{Zone: zone, Token: tok,
+		d.TokensKnown = d.TokensKnown && (ok3 || !unknown)
+		d.Cloudflare = append(d.Cloudflare, cloudflareBlock{Zone: zone, Token: tok, TokenUnknown: unknown,
 			Block: acme.Block{Kind: acme.KindCloudflare, Index: i, Zone: zone, MatchDomains: md}})
 	}
 	return d
@@ -169,6 +178,12 @@ func (r *acmeCertificateResource) ValidateConfig(ctx context.Context, req resour
 		return
 	}
 
+	if !cn.IsUnknown() && !cn.IsNull() {
+		if err := acme.ValidateCommonName(cn.ValueString()); err != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("common_name"), "Invalid common name", err.Error())
+		}
+	}
+
 	var ids []string
 	namesKnown := !cn.IsUnknown() && !cn.IsNull() && !sans.IsUnknown()
 	if namesKnown {
@@ -184,7 +199,9 @@ func (r *acmeCertificateResource) ValidateConfig(ctx context.Context, req resour
 		slices.Sort(sorted)
 		ids, err = acme.Identifiers(cn.ValueString(), sorted)
 		if err != nil {
-			resp.Diagnostics.AddAttributeError(path.Root("common_name"), "Invalid certificate names", err.Error())
+			if !strings.Contains(err.Error(), "common_name: ") || acme.ValidateCommonName(cn.ValueString()) == nil {
+				resp.Diagnostics.AddAttributeError(path.Root("common_name"), "Invalid certificate names", err.Error())
+			}
 			ids = nil
 		}
 	}
@@ -222,6 +239,7 @@ func (r *acmeCertificateResource) ModifyPlan(ctx context.Context, req resource.M
 	creating := req.State.Raw.IsNull()
 
 	order := creating
+	orderReason := "the certificate does not exist yet"
 	if !creating {
 		var state acmeCertificateModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -230,6 +248,7 @@ func (r *acmeCertificateResource) ModifyPlan(ctx context.Context, req resource.M
 		}
 		var reason string
 		order, reason = decideOrder(time.Now(), plan, state)
+		orderReason = reason
 		if order {
 			tflog.Info(ctx, "a new certificate will be ordered", map[string]any{"reason": reason})
 			for _, a := range orderedComputed {
@@ -247,22 +266,127 @@ func (r *acmeCertificateResource) ModifyPlan(ctx context.Context, req resource.M
 	if !order || resp.Diagnostics.HasError() {
 		return
 	}
+	// A new certificate is certain to be ordered; an update orders only when the values
+	// that decide it are known.
+	r.checkTokens(ctx, plan, req.Config, orderReason, creating || !orderUncertain(plan), &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	r.preflight(ctx, plan, req.Config, creating, &resp.Diagnostics)
+}
+
+// orderUncertain is true when the plan has values that decide whether an update orders
+// and are not known yet.
+func orderUncertain(plan acmeCertificateModel) bool {
+	return plan.CommonName.IsUnknown() || plan.SANs.IsUnknown() || plan.KeyType.IsUnknown() || plan.MinDays.IsUnknown() || plan.RegistrationID.IsUnknown()
 }
 
 // decideOrder decides whether an update orders a new certificate. A value that is not
 // known yet counts as a change, so that nothing is promised that apply might not do.
 func decideOrder(now time.Time, plan, state acmeCertificateModel) (bool, string) {
-	if plan.CommonName.IsUnknown() || plan.SANs.IsUnknown() || plan.KeyType.IsUnknown() || plan.MinDays.IsUnknown() {
-		return true, "a name, the key type or min_days_remaining is not known until apply"
+	if orderUncertain(plan) {
+		return true, "a name, the key type, min_days_remaining or the registration is not known until apply"
 	}
 	notAfter, err := time.Parse(time.RFC3339, state.NotAfter.ValueString())
 	if err != nil {
 		return true, "the expiry of the current certificate is not known"
 	}
 	changed := acme.NamesChanged(plan.CommonName.ValueString(), setStrings(plan.SANs), state.CommonName.ValueString(), setStrings(state.SANs)) ||
-		acme.KeyTypeChanged(plan.KeyType.ValueString(), state.KeyType.ValueString())
+		acme.KeyTypeChanged(plan.KeyType.ValueString(), state.KeyType.ValueString()) ||
+		authorityChanged(plan.RegistrationID, state.RegistrationID)
 	return acme.NeedsOrder(now, notAfter, plan.MinDays.ValueInt64(), state.Version.ValueString(), state.IssuedVersion.ValueString(), changed)
+}
+
+// authorityChanged reports whether registration_id moved from one certificate authority
+// to another: both values are known and their server URLs differ. A registration that
+// was not recorded before (null, as after an import) only gets recorded, and another
+// account key at the same authority changes nothing about the certificate.
+func authorityChanged(plan, state types.String) bool {
+	if plan.IsNull() || plan.IsUnknown() || state.IsNull() || state.IsUnknown() {
+		return false
+	}
+	planServer, _, err1 := acme.ParseRegistrationID(plan.ValueString())
+	stateServer, _, err2 := acme.ParseRegistrationID(state.ValueString())
+	return err1 == nil && err2 == nil && planServer != stateServer
+}
+
+// usedBlocks returns the blocks that serve at least one name of the order, with the
+// flags of the original. A block that serves no name is never used by the order, so it
+// needs no token.
+func usedBlocks(ids []string, all dnsBlocks) (dnsBlocks, error) {
+	routes, err := acme.Route(ids, all.Blocks())
+	if err != nil {
+		return dnsBlocks{}, err
+	}
+	used := map[string]bool{}
+	for _, b := range routes {
+		used[b.String()] = true
+	}
+	out := dnsBlocks{Known: all.Known, TokensKnown: all.TokensKnown}
+	for _, a := range all.Azure {
+		if used[a.Block.String()] {
+			out.Azure = append(out.Azure, a)
+		}
+	}
+	for _, c := range all.Cloudflare {
+		if used[c.Block.String()] {
+			out.Cloudflare = append(out.Cloudflare, c)
+		}
+	}
+	return out, nil
+}
+
+// checkTokens runs when an order is planned. It fails the plan when a DNS block that
+// will serve a name of the order has no token to use: a Cloudflare block without
+// api_token, or an azure_dns block while the provider has no
+// acme.resource_manager_access_token. A token that is not known until apply is checked
+// at apply instead. Nothing is read or written here.
+func (r *acmeCertificateResource) checkTokens(ctx context.Context, plan acmeCertificateModel, cfg tfConfig, reason string, certain bool, diags *diag.Diagnostics) {
+	// Whether an order really happens, or which names it has, may depend on values that
+	// are not known yet; the check is then repeated at apply.
+	if !certain || plan.CommonName.IsUnknown() || plan.SANs.IsUnknown() {
+		return
+	}
+	blocks, ok := readDNSBlocks(ctx, cfg, diags)
+	if !ok || !blocks.Known {
+		return
+	}
+	ids, err := identifiersOf(plan)
+	if err != nil {
+		return // ValidateConfig reports it
+	}
+	used, err := usedBlocks(ids, blocks)
+	if err != nil {
+		return // ValidateConfig reports it
+	}
+	for _, z := range used.Cloudflare {
+		if z.Token == "" && !z.TokenUnknown {
+			diags.AddAttributeError(path.Root("cloudflare").AtListIndex(z.Block.Index).AtName("api_token"),
+				"A Cloudflare API token is required to order the certificate",
+				missingCloudflareTokenMessage(z.Block, reason))
+		}
+	}
+	if len(used.Azure) == 0 {
+		return
+	}
+	pd, _ := r.data.(*providerData)
+	if pd == nil || pd.acme == nil || pd.acme.unknown || pd.acme.resourceManagerUnknown || pd.acme.resourceManagerToken != "" {
+		return
+	}
+	diags.AddError("An Azure Resource Manager access token is required to order the certificate",
+		missingResourceManagerTokenMessage(used.Azure[0].Block, reason))
+}
+
+func missingCloudflareTokenMessage(b acme.Block, reason string) string {
+	return fmt.Sprintf("A new certificate has to be ordered (%s), and the %s block serves names of the order, but its api_token is not set. "+
+		"Set api_token (typically from an ephemeral Key Vault secret) in the configuration. "+
+		"It is needed only when an order runs; plans in which nothing is ordered do not need it.", reason, b)
+}
+
+func missingResourceManagerTokenMessage(b acme.Block, reason string) string {
+	return fmt.Sprintf("A new certificate has to be ordered (%s), and the %s block serves names of the order, but the provider's "+
+		"acme.resource_manager_access_token is not set. Set it (typically from an azidentity ephemeral resource for "+
+		"https://management.azure.com). It is needed only when an order runs; plans in which nothing is ordered do not need it.", reason, b)
 }
 
 // preflight reads, without writing anything, what an order needs: that the Key Vault
@@ -281,7 +405,15 @@ func (r *acmeCertificateResource) preflight(ctx context.Context, plan acmeCertif
 		return
 	}
 	// Names and routing are validated by ValidateConfig; a configuration that fails
-	// there never gets here.
+	// there never gets here. Only the blocks that serve a name of the order are checked.
+	ids, err := identifiersOf(plan)
+	if err != nil {
+		return
+	}
+	blocks, err = usedBlocks(ids, blocks)
+	if err != nil {
+		return
+	}
 	access := requireACME(pd, diags, false)
 	if access == nil {
 		return
@@ -301,22 +433,18 @@ func (r *acmeCertificateResource) preflight(ctx context.Context, plan acmeCertif
 		return
 	}
 
-	if len(blocks.Azure) > 0 {
-		switch {
-		case access.resourceManagerToken != "":
-			c, err := azuredns.New(access.env.resourceManagerURL, access.resourceManagerToken, access.http)
-			if err != nil {
-				diags.AddError("Cannot reach Azure DNS", err.Error())
-				return
-			}
-			for _, z := range blocks.Azure {
-				if err := azuredns.NewZonePublisher(c, z.Subscription, z.ResourceGroup, z.Zone).Check(ctx); err != nil {
-					diags.AddError("Cannot use the Azure DNS zone", fmt.Sprintf("azure_dns block %d: %s", z.Block.Index, err))
-				}
-			}
-		case !access.resourceManagerUnknown:
-			requireACME(pd, diags, true)
+	// A token that is missing or not known yet skips its zone check; checkTokens and the
+	// order itself report a missing token.
+	if len(blocks.Azure) > 0 && access.resourceManagerToken != "" {
+		c, err := azuredns.New(access.env.resourceManagerURL, access.resourceManagerToken, access.http)
+		if err != nil {
+			diags.AddError("Cannot reach Azure DNS", err.Error())
 			return
+		}
+		for _, z := range blocks.Azure {
+			if err := azuredns.NewZonePublisher(c, z.Subscription, z.ResourceGroup, z.Zone).Check(ctx); err != nil {
+				diags.AddError("Cannot use the Azure DNS zone", fmt.Sprintf("azure_dns block %d: %s", z.Block.Index, err))
+			}
 		}
 	}
 	for _, z := range blocks.Cloudflare {

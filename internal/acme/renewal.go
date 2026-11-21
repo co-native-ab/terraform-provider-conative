@@ -13,11 +13,11 @@ const day = 24 * time.Hour
 //
 // An order is needed when the certificate expires within minDays days (the boundary
 // counts), when Key Vault's current version differs from the version this resource last
-// issued, or when the names or the key type changed.
+// issued, or when the names, the key type or the certificate authority changed.
 func NeedsOrder(now, notAfter time.Time, minDays int64, version, issuedVersion string, namesOrKeyChanged bool) (bool, string) {
 	switch {
 	case namesOrKeyChanged:
-		return true, "the names or the key type changed"
+		return true, "the names, the key type or the certificate authority changed"
 	case version != issuedVersion:
 		return true, fmt.Sprintf("the certificate's current version %q was added outside Terraform (last issued: %q)", version, issuedVersion)
 	case !now.Add(time.Duration(minDays) * day).Before(notAfter):

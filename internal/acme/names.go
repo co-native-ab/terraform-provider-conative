@@ -8,6 +8,20 @@ import (
 
 const maxNameLength = 253
 
+// maxCommonNameLength is the longest subject common name RFC 5280 allows (ub-common-name).
+// Some certificate authorities drop a longer one from the certificate, and the names
+// remain covered by the subject alternative names, but the resource requires a
+// common name that fits so that it can be read back.
+const maxCommonNameLength = 64
+
+// ValidateCommonName checks that a common name fits in a certificate's subject.
+func ValidateCommonName(s string) error {
+	if len(s) > maxCommonNameLength {
+		return fmt.Errorf("%q is %d characters long; a common name can have at most %d", s, len(s), maxCommonNameLength)
+	}
+	return nil
+}
+
 // ValidateIdentifier checks a certificate name: lower-case LDH labels of 1 to 63
 // characters, at least two labels, at most 253 characters in total, no trailing dot,
 // and an optional single leading "*." wildcard. Unicode names must be given in their
@@ -79,6 +93,9 @@ func Base(identifier string) string { return strings.TrimPrefix(identifier, "*."
 // invalid names, duplicates and a common name repeated among the alternative names.
 func Identifiers(commonName string, sans []string) ([]string, error) {
 	if err := ValidateIdentifier(commonName); err != nil {
+		return nil, fmt.Errorf("common_name: %w", err)
+	}
+	if err := ValidateCommonName(commonName); err != nil {
 		return nil, fmt.Errorf("common_name: %w", err)
 	}
 	seen := map[string]bool{commonName: true}

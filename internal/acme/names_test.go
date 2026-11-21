@@ -62,3 +62,21 @@ func TestIdentifiers(t *testing.T) {
 		t.Error("Base")
 	}
 }
+
+func TestCommonNameLength(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 60) + ".example.com" // 72 characters
+	if ValidateCommonName("example.com") != nil || ValidateCommonName(strings.Repeat("a", 64)) != nil {
+		t.Error("a short common name was refused")
+	}
+	if ValidateCommonName(strings.Repeat("a", 65)) == nil {
+		t.Error("a 65 character common name was accepted")
+	}
+	if _, err := Identifiers(long, nil); err == nil {
+		t.Error("a long common name was accepted")
+	}
+	// Alternative names may be longer than a common name can be.
+	if _, err := Identifiers("example.com", []string{long}); err != nil {
+		t.Errorf("a long alternative name was refused: %v", err)
+	}
+}

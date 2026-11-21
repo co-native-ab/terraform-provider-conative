@@ -89,15 +89,22 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 			"challenges. Key Vault generates the private key (exportable, a new key for every version) and the " +
 			"signing request; the provider only passes the signing request to the authority and merges the issued " +
 			"certificate back. Neither the private key nor any password is ever in Terraform state. Renewal adds a " +
-			"new version to the same Key Vault certificate, so services that reference the versionless ID pick it up.",
+			"new version to the same Key Vault certificate, so services that reference the versionless ID pick it up. " +
+			"Refreshing and planning only read certificate metadata and the public certificate from Key Vault: they never " +
+			"read a secret, sign, call the certificate authority or write anywhere, and they need neither the Cloudflare " +
+			"token nor the Resource Manager token. Those are needed only when an order runs.",
 		Attributes: map[string]schema.Attribute{
 			"registration_id": schema.StringAttribute{
-				MarkdownDescription: "The `id` of a `conative_acme_registration`.",
-				Required:            true,
-				Validators:          []validator.String{checkString("must be <server_url>|<account_key_id>", validateRegistrationID)},
+				MarkdownDescription: "The `id` of a `conative_acme_registration`. Changing it to a registration at " +
+					"another certificate authority (a different `server_url`, for example from a staging to a production " +
+					"directory) orders a new certificate in place; changing it to another account at the same authority, " +
+					"or setting it after an import, only updates the state.",
+				Required:   true,
+				Validators: []validator.String{checkString("must be <server_url>|<account_key_id>", validateRegistrationID)},
 			},
 			"key_vault_url": schema.StringAttribute{
-				MarkdownDescription: "The vault URL, for example `https://example.vault.azure.net/`. Changing it to " +
+				MarkdownDescription: "The vault URL, for example `https://example.vault.azure.net/`. The host must end in " +
+					"`.vault.azure.net`; access tokens are sent to no other host. Changing it to " +
 					"another vault replaces the resource; a different spelling of the same URL does not.",
 				Required:      true,
 				Validators:    []validator.String{checkString("must be a Key Vault URL such as https://example.vault.azure.net/", validateVaultURL)},
@@ -112,8 +119,9 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 				PlanModifiers: replace,
 			},
 			"common_name": schema.StringAttribute{
-				MarkdownDescription: "The certificate's common name; always also a subject alternative name. " +
-					"Changing it issues a new version.",
+				MarkdownDescription: "The certificate's common name, at most 64 characters; always also a subject alternative name. " +
+					"Changing it issues a new version. Some certificate authorities leave the common name out of the " +
+					"certificate they issue; the provider then keeps the configured value.",
 				Required: true,
 			},
 			"subject_alternative_names": schema.SetAttribute{
@@ -138,8 +146,11 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 			},
 			"revoke_on_destroy": schema.BoolAttribute{
 				MarkdownDescription: "Whether destroying the resource revokes the certificate at the authority before " +
-					"deleting it from Key Vault. A certificate that was imported and not yet renewed by this resource " +
-					"is never revoked (it was issued elsewhere); destroy warns and deletes it.",
+					"deleting it from Key Vault. The version revoked is the one this resource issued last " +
+					"(`issued_version`), not necessarily the current version. It is skipped when that version has " +
+					"expired or is gone, and for a certificate that was imported and not yet renewed by this resource " +
+					"(it was issued elsewhere): destroy then warns and only deletes it. Revoking signs a request " +
+					"with the account key.",
 				Required: true,
 			},
 			"id": schema.StringAttribute{
@@ -211,8 +222,11 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 					"api_token": schema.StringAttribute{
 						MarkdownDescription: "A Cloudflare API token with Zone Read and DNS Edit on the zone. Write-only: " +
 							"never stored in the plan or the state. Needs Terraform 1.11 or later. Supply it from an " +
-							"ephemeral value.",
-						Required:  true,
+							"ephemeral value. Optional because it is needed only when an order runs (a new " +
+							"certificate, a renewal or a change that orders): plans in which nothing is ordered succeed " +
+							"without it. When an order is planned and a name of the order is served by this block, a " +
+							"missing token is an error.",
+						Optional:  true,
 						WriteOnly: true,
 						Sensitive: true,
 					},
@@ -337,6 +351,17 @@ func (r *acmeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 		if err != nil {
 			operationError(&resp.Diagnostics, "read", state.object(), err)
 			return
+		}
+		// A certificate authority may leave the common name out of the certificate (it
+		// does when the name is longer than 64 characters, or when its profile has no
+		// subject). When the configured name is among the certificate's names, nothing
+		// changed: keep it.
+		if info.CommonName == "" {
+			cn := strings.ToLower(state.CommonName.ValueString())
+			if cn != "" && slices.Contains(info.SANs, cn) {
+				info.CommonName = cn
+				info.SANs = slices.DeleteFunc(slices.Clone(info.SANs), func(n string) bool { return n == cn })
+			}
 		}
 		state.SANs = namesSet(info.SANs, state.SANs)
 	}
@@ -484,6 +509,34 @@ func (r *acmeCertificateResource) order(ctx context.Context, plan *acmeCertifica
 	blocks, ok := readDNSBlocks(ctx, config, diags)
 	if !ok {
 		return issuer.Result{}, false
+	}
+	ids, err := identifiersOf(*plan)
+	if err != nil {
+		operationError(diags, "prepare the order for", plan.object(), err)
+		return issuer.Result{}, false
+	}
+	// Only the blocks that serve a name of the order are used, and only they need a token.
+	blocks, err = usedBlocks(ids, blocks)
+	if err != nil {
+		operationError(diags, "prepare the order for", plan.object(), err)
+		return issuer.Result{}, false
+	}
+	for _, z := range blocks.Cloudflare {
+		if z.Token == "" {
+			diags.AddAttributeError(path.Root("cloudflare").AtListIndex(z.Block.Index).AtName("api_token"),
+				"A Cloudflare API token is required to order the certificate",
+				missingCloudflareTokenMessage(z.Block, "the order is running now"))
+		}
+	}
+	if diags.HasError() {
+		return issuer.Result{}, false
+	}
+	if len(blocks.Azure) > 0 {
+		if pd, _ := r.data.(*providerData); pd != nil && pd.acme != nil && pd.acme.keyVaultToken != "" && pd.acme.resourceManagerToken == "" {
+			diags.AddError("An Azure Resource Manager access token is required to order the certificate",
+				missingResourceManagerTokenMessage(blocks.Azure[0].Block, "the order is running now"))
+			return issuer.Result{}, false
+		}
 	}
 	access := r.access(diags, len(blocks.Azure) > 0)
 	if access == nil {

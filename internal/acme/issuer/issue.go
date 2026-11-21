@@ -176,6 +176,7 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	}
 	slices.Sort(fqdns)
 	owner := map[string]DNSPublisher{}
+	ownerBlock := map[string]acme.Block{}
 	for identifier := range values {
 		block, ok := o.Routes[identifier]
 		if !ok {
@@ -186,13 +187,14 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 			return Result{}, fmt.Errorf("no publisher for %s", block)
 		}
 		owner[acme.ChallengeFQDN(identifier)] = pub
+		ownerBlock[acme.ChallengeFQDN(identifier)] = block
 	}
 	for _, fqdn := range fqdns {
 		pub := owner[fqdn]
 		// Record before publishing: a failure half way still removes what was written.
 		written = append(written, published{publisher: pub, fqdn: fqdn, values: records[fqdn]})
 		if perr := pub.Publish(ctx, fqdn, records[fqdn]); perr != nil {
-			return Result{}, fmt.Errorf("cannot publish the challenge record %s: %w", fqdn, perr)
+			return Result{}, fmt.Errorf("cannot publish the challenge record %s through the %s block (zone %s): %w", fqdn, ownerBlock[fqdn], pub.Zone(), perr)
 		}
 	}
 	for _, fqdn := range fqdns {

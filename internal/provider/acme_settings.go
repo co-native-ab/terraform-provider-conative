@@ -80,8 +80,10 @@ func acmeSettingsSchema() schema.Attribute {
 			},
 			"resource_manager_access_token": schema.StringAttribute{
 				Description: "A Microsoft Entra access token for `https://management.azure.com/.default`, " +
-					"used to write DNS-01 challenge records in Azure DNS. Required when a certificate has an " +
-					"`azure_dns` block.",
+					"used to write DNS-01 challenge records in Azure DNS. Optional: it is needed only when an order " +
+					"runs (a new certificate or a renewal) for names served by an `azure_dns` block. Refreshing and " +
+					"planning, and plans in which nothing is ordered, do not need it. When an order is planned and " +
+					"the token is missing, the plan fails and names the block.",
 				Optional:  true,
 				Sensitive: true,
 			},
