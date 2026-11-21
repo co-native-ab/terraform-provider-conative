@@ -14,6 +14,9 @@ var (
 	guidRE    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	rgRE      = regexp.MustCompile(`^[0-9A-Za-z_().-]{1,90}$`)
 	emailRE   = regexp.MustCompile(`^[^\s@,]+@[^\s@,]+$`)
+	// vaultLabelRE is what Key Vault allows as a vault name: 3 to 24 letters, digits and
+	// hyphens (compared in lower case).
+	vaultLabelRE = regexp.MustCompile(`^[a-z0-9-]{3,24}$`)
 )
 
 // vaultHostSuffix is the DNS suffix of every Key Vault in the public Azure cloud. The
@@ -26,6 +29,9 @@ func checkVaultHost(u *url.URL) error {
 	host := strings.ToLower(u.Hostname())
 	if len(host) <= len(vaultHostSuffix) || !strings.HasSuffix(host, vaultHostSuffix) {
 		return fmt.Errorf("the host must be a Key Vault name ending in %s", vaultHostSuffix)
+	}
+	if label := strings.TrimSuffix(host, vaultHostSuffix); !vaultLabelRE.MatchString(label) {
+		return fmt.Errorf("the vault name %q must be 3 to 24 letters, digits or hyphens", label)
 	}
 	return nil
 }

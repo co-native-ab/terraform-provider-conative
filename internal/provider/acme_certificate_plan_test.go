@@ -84,12 +84,12 @@ func TestVaultURLReplacesOnlyWhenTheVaultDiffers(t *testing.T) {
 		state, plan types.String
 		replace     bool
 	}{
-		"same":             {types.StringValue("https://a.vault.azure.net"), types.StringValue("https://a.vault.azure.net"), false},
-		"trailing slash":   {types.StringValue("https://a.vault.azure.net"), types.StringValue("https://a.vault.azure.net/"), false},
-		"host case":        {types.StringValue("https://A.vault.azure.net/"), types.StringValue("https://a.vault.azure.net"), false},
-		"another vault":    {types.StringValue("https://a.vault.azure.net"), types.StringValue("https://b.vault.azure.net"), true},
-		"not known yet":    {types.StringValue("https://a.vault.azure.net"), types.StringUnknown(), true},
-		"nothing in state": {types.StringNull(), types.StringValue("https://a.vault.azure.net"), false},
+		"same":             {types.StringValue("https://abc.vault.azure.net"), types.StringValue("https://abc.vault.azure.net"), false},
+		"trailing slash":   {types.StringValue("https://abc.vault.azure.net"), types.StringValue("https://abc.vault.azure.net/"), false},
+		"host case":        {types.StringValue("https://ABC.vault.azure.net/"), types.StringValue("https://abc.vault.azure.net"), false},
+		"another vault":    {types.StringValue("https://abc.vault.azure.net"), types.StringValue("https://def.vault.azure.net"), true},
+		"not known yet":    {types.StringValue("https://abc.vault.azure.net"), types.StringUnknown(), true},
+		"nothing in state": {types.StringNull(), types.StringValue("https://abc.vault.azure.net"), false},
 	} {
 		var resp planmodifier.StringResponse
 		vaultURLReplace{}.PlanModifyString(context.Background(), planmodifier.StringRequest{
@@ -97,6 +97,10 @@ func TestVaultURLReplacesOnlyWhenTheVaultDiffers(t *testing.T) {
 		}, &resp)
 		if resp.RequiresReplace != c.replace {
 			t.Errorf("%s: RequiresReplace = %t, want %t", name, resp.RequiresReplace, c.replace)
+		}
+		// The same vault in another spelling keeps the value in state, so that no change shows.
+		if !c.replace && !c.state.IsNull() && !resp.PlanValue.Equal(c.state) {
+			t.Errorf("%s: the planned value %s is not the state value %s", name, resp.PlanValue, c.state)
 		}
 	}
 }

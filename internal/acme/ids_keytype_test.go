@@ -12,9 +12,12 @@ import (
 func TestVaultURL(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"https://example.vault.azure.net":      "https://example.vault.azure.net",
-		"https://Example.vault.azure.net/":     "https://example.vault.azure.net",
-		"https://example.vault.azure.net:8443": "https://example.vault.azure.net:8443",
+		"https://example.vault.azure.net":                  "https://example.vault.azure.net",
+		"https://Example.vault.azure.net/":                 "https://example.vault.azure.net",
+		"https://example.vault.azure.net:8443":             "https://example.vault.azure.net:8443",
+		"https://abc.vault.azure.net":                      "https://abc.vault.azure.net",
+		"https://A-1-b2.vault.azure.net/":                  "https://a-1-b2.vault.azure.net",
+		"https://abcdefghijklmnopqrstuvwx.vault.azure.net": "https://abcdefghijklmnopqrstuvwx.vault.azure.net",
 	} {
 		if got, err := ParseVaultURL(in); err != nil || got != want {
 			t.Errorf("%q: %q, %v", in, got, err)
@@ -24,6 +27,9 @@ func TestVaultURL(t *testing.T) {
 		"http://example.vault.azure.net", "https://user@example.vault.azure.net", "https://example.vault.azure.net/keys",
 		"https://example.vault.azure.net?x=1", "https://example.vault.azure.net#f", "example.vault.azure.net", "",
 		// Only vault names under vault.azure.net receive an access token.
+		// The vault name is 3 to 24 letters, digits and hyphens.
+		"https://ab.vault.azure.net/", "https://exa_mple.vault.azure.net/", "https://a.b.vault.azure.net/",
+		"https://abcdefghijklmnopqrstuvwxy.vault.azure.net/", "https://exämple.vault.azure.net/",
 		"https://example.vault.azure.com/", "https://vault.azure.net", "https://evilvault.azure.net", "https://example.vault.azure.net.example.com",
 		"https://localhost:8443", "https://127.0.0.1", "https://example.vault.usgovcloudapi.net",
 	} {
@@ -31,7 +37,7 @@ func TestVaultURL(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	if !VaultURLEqual("https://A.vault.azure.net/", "https://a.vault.azure.net") || VaultURLEqual("https://a.net", "https://b.net") || VaultURLEqual("x", "x") {
+	if !VaultURLEqual("https://Abc.vault.azure.net/", "https://abc.vault.azure.net") || VaultURLEqual("https://a.net", "https://b.net") || VaultURLEqual("x", "x") {
 		t.Error("VaultURLEqual")
 	}
 }
