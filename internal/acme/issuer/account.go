@@ -122,7 +122,8 @@ func UpdateContact(ctx context.Context, r Registration, accountURL, email string
 }
 
 // Revoke revokes a certificate with the account key. A certificate that is already
-// revoked counts as revoked.
+// revoked counts as revoked: golang.org/x/crypto/acme treats the alreadyRevoked problem
+// as success and returns no error, so no special case is needed here.
 func Revoke(ctx context.Context, r Registration, leafDER []byte) error {
 	acct, err := Lookup(ctx, r)
 	if err != nil {

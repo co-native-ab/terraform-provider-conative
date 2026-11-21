@@ -243,7 +243,6 @@ func Issue(ctx context.Context, o Order) (res Result, err error) {
 	info, ierr := acme.Inspect(bundle.Cer)
 	if ierr != nil {
 		// The merge succeeded; nothing can be undone, so say what is wrong.
-		merged = true
 		return Result{}, fmt.Errorf("the merged certificate cannot be read: %w", ierr)
 	}
 	return Result{Bundle: bundle, Info: info}, nil
