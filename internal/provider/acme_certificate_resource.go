@@ -105,8 +105,11 @@ func (r *acmeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 				MarkdownDescription: "The `id` of a `conative_acme_registration`. Changing it to a registration at " +
 					"another certificate authority (a different `server_url`, for example from a staging to a production " +
 					"directory) orders a new certificate in place; changing it to another account at the same authority, " +
-					"or setting it after an import, only updates the state. When the registration is replaced in the " +
-					"same run, so that this value is not known until apply, the certificate is ordered again.",
+					"or setting it after an import, only updates the state. When the registration is created or replaced " +
+					"in the same run, so that this value is not known until the apply, the plan shows an in-place update " +
+					"with the attributes of a new version unknown, and the apply decides with the known value by the same " +
+					"rules as any other update: a change of authority, of the names or of the key type orders, as does a " +
+					"certificate that is due or whose current version was added outside Terraform.",
 				Required:   true,
 				Validators: []validator.String{checkString("must be <server_url>|<account_key_id>", validateRegistrationID)},
 			},

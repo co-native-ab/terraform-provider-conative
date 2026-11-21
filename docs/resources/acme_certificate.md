@@ -63,7 +63,7 @@ resource "conative_acme_certificate" "example" {
 - `common_name` (String) The certificate's common name, at most 64 characters; always also a subject alternative name. Changing it issues a new version. Some certificate authorities leave the common name out of the certificate they issue; the provider then keeps the configured value. It is null after importing a certificate that has no subject common name; the names are then all in `subject_alternative_names` until the configuration is applied.
 - `key_type` (String) `RSA2048`, `RSA3072`, `RSA4096`, `P256`, `P384`, `P521`. The certificate authority decides which it accepts (Let's Encrypt does not accept `P521`). Changing it issues a new version.
 - `key_vault_url` (String) The vault URL, for example `https://example.vault.azure.net/`. The host must end in `.vault.azure.net`; access tokens are sent to no other host. Changing it to another vault replaces the resource; a different spelling of the same URL (a trailing slash, the case of the host) is no change at all.
-- `registration_id` (String) The `id` of a `conative_acme_registration`. Changing it to a registration at another certificate authority (a different `server_url`, for example from a staging to a production directory) orders a new certificate in place; changing it to another account at the same authority, or setting it after an import, only updates the state. When the registration is replaced in the same run, so that this value is not known until apply, the certificate is ordered again.
+- `registration_id` (String) The `id` of a `conative_acme_registration`. Changing it to a registration at another certificate authority (a different `server_url`, for example from a staging to a production directory) orders a new certificate in place; changing it to another account at the same authority, or setting it after an import, only updates the state. When the registration is created or replaced in the same run, so that this value is not known until the apply, the plan shows an in-place update with the attributes of a new version unknown, and the apply decides with the known value by the same rules as any other update: a change of authority, of the names or of the key type orders, as does a certificate that is due or whose current version was added outside Terraform.
 - `revoke_on_destroy` (Boolean) Whether destroying the resource revokes the certificate at the authority before deleting it from Key Vault. The version revoked is the one this resource issued last (`issued_version`), not necessarily the current version. It is skipped when that version has expired or is gone, and for a certificate that was imported and not yet renewed by this resource (it was issued elsewhere): destroy then warns and only deletes it. It is revoked with the account that ordered it, also when `registration_id` has moved to another account at the same authority since; if that account's key no longer exists, destroy warns and does not revoke. Revoking signs a request with the account key.
 
 ### Optional
@@ -157,8 +157,9 @@ policy, and it changes nothing.
 See [Permissions](../guides/acme-certificates-in-key-vault#permissions) in the guide for the minimum
 Azure RBAC data actions per operation. Refresh, import and plan need only `certificates/read` in Key Vault,
 also when an order is due (such a plan also reads the DNS zones). They never touch the certificate's pending
-operation, which Key Vault authorises as `certificates/create/action` even for a read. Ordering, renewing and
-destroying need more, and nothing ever reads a secret. The guide also explains how to force a renewal and
+operation, which Key Vault authorises as `certificates/create/action` even for a read. Ordering and renewing
+need the certificate read, create, update and delete rights (the last three for the pending operation) and the
+account key's read and sign rights, destroying needs the delete right, and nothing ever reads a secret. The guide also explains how to force a renewal and
 exactly what `revoke_on_destroy` revokes.
 
 ## Import
