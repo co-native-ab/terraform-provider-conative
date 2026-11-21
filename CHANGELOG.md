@@ -21,3 +21,6 @@ bumps the minor version.
 - Data sources `conative_azuresql_database_user` and `conative_azuresql_database_users` to look up
   database users.
 - Documentation, including a guide to the Azure SQL resources.
+- Documentation of how to supply the access token with the ephemeral resources of the
+  [`co-native-ab/azidentity`](https://registry.terraform.io/providers/co-native-ab/azidentity) provider,
+  the recommended source, or from an ephemeral variable.

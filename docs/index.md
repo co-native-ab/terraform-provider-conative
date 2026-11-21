@@ -12,7 +12,70 @@ Manages resources that the major cloud providers do not cover, or do not cover w
 See the [Azure SQL guide](guides/azure-sql-entra-principals) for how the access token, user creation,
 import and retries work.
 
+## Authentication
+
+The provider contains no sign-in code. For Azure SQL Database it takes a Microsoft Entra access token for
+`https://database.windows.net/.default` in `azuresql.access_token`, and any source of such a token works.
+
+The recommended way to obtain one is the [`co-native-ab/azidentity`](https://registry.terraform.io/providers/co-native-ab/azidentity)
+provider, whose ephemeral resources acquire a token at the start of each run without storing it in the plan
+or the state (Terraform 1.10 or later). The example below uses `azidentity_default_credential`, which picks a
+suitable method on its own, such as environment variables, a managed identity or an Azure CLI session. The
+other credential types work the same way: `azidentity_azure_cli_credential`, `azidentity_client_secret_credential`
+and `azidentity_client_assertion_credential` (for example workload identity federation in a CI pipeline) all
+take `scopes` and return `access_token`. Leave their `continue_on_error` at its default, `false`, so that a
+failure to obtain the token stops the run where it happens.
+
 ## Example Usage
+
+```terraform
+terraform {
+  # Ephemeral resources need Terraform 1.10 or later.
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    azidentity = {
+      source  = "co-native-ab/azidentity"
+      version = "~> 0.1"
+    }
+    conative = {
+      source = "co-native-ab/conative"
+    }
+  }
+}
+
+provider "azidentity" {}
+
+# Obtain a Microsoft Entra access token for Azure SQL Database at the start of each run.
+# The token is an ephemeral value, so it never reaches the plan or the state.
+ephemeral "azidentity_default_credential" "sql" {
+  scopes = ["https://database.windows.net/.default"]
+}
+
+provider "conative" {
+  azuresql = {
+    server        = "example-server.database.windows.net"
+    access_token  = ephemeral.azidentity_default_credential.sql.access_token
+    retry_timeout = "2m" # optional
+  }
+}
+
+# To manage a second server, add a provider alias. The same token works for every
+# server the identity has access to.
+provider "conative" {
+  alias = "reporting"
+
+  azuresql = {
+    server       = "reporting-server.database.windows.net"
+    access_token = ephemeral.azidentity_default_credential.sql.access_token
+  }
+}
+```
+
+### Supplying the token from a variable
+
+A token obtained outside Terraform, for example with `az account get-access-token` or from a pipeline
+variable, works just as well. Declare the variable `ephemeral` so that Terraform does not keep it.
 
 ```terraform
 terraform {
@@ -24,8 +87,13 @@ terraform {
 }
 
 # A Microsoft Entra access token for https://database.windows.net/.default,
-# obtained outside the provider. Marking the variable ephemeral keeps the token out
-# of the plan and the state (Terraform 1.10 or later).
+# obtained outside Terraform, for example with
+#
+#   export TF_VAR_sql_token="$(az account get-access-token \
+#     --resource https://database.windows.net/ --query accessToken --output tsv)"
+#
+# Marking the variable ephemeral keeps the token out of the plan and the state
+# (Terraform 1.10 or later).
 variable "sql_token" {
   type      = string
   sensitive = true
@@ -34,18 +102,7 @@ variable "sql_token" {
 
 provider "conative" {
   azuresql = {
-    server        = "example-server.database.windows.net"
-    access_token  = var.sql_token
-    retry_timeout = "2m" # optional
-  }
-}
-
-# To manage a second server, add a provider alias.
-provider "conative" {
-  alias = "reporting"
-
-  azuresql = {
-    server       = "reporting-server.database.windows.net"
+    server       = "example-server.database.windows.net"
     access_token = var.sql_token
   }
 }
