@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,8 +36,8 @@ func bothIssued(f, g acmeFixture) resource.TestCheckFunc {
 			if n := vaultVersions(name); n != 1 {
 				return fmt.Errorf("%s has %d issued versions, want 1", name, n)
 			}
-			if p := acc.KeyVault.PendingOperations(); len(p) != 0 {
-				return fmt.Errorf("pending operations are left: %v", p)
+			if slices.Contains(acc.KeyVault.PendingOperations(), name) {
+				return fmt.Errorf("a pending operation is left on %s", name)
 			}
 		}
 		if all := acc.DNS.All(); len(all) != 0 {

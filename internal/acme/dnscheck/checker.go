@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"slices"
 	"strings"
@@ -355,7 +356,10 @@ func (a Authoritative) roundTrip(ctx context.Context, network, address string, w
 	}
 	_ = conn.SetDeadline(deadline)
 	if network == "tcp" {
-		framed := binary.BigEndian.AppendUint16(nil, uint16(len(wire)))
+		if len(wire) > math.MaxUint16 {
+			return nil, errors.New("the query is too long")
+		}
+		framed := binary.BigEndian.AppendUint16(nil, uint16(len(wire))) //nolint:gosec // bounded just above
 		if _, err := conn.Write(append(framed, wire...)); err != nil {
 			return nil, err
 		}

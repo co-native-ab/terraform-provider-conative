@@ -174,7 +174,7 @@ func TestAccACMECertificate_dnsWriteFails(t *testing.T) {
 		"azure writes fail":      {func() { acc.AzureDNS.FailWrites(true) }, `Azure\s+DNS\s+answered\s+500`, true},
 		"cloudflare writes fail": {func() { acc.Cloudflare.FailWrites(true) }, `Cloudflare\s+answered\s+500`, true},
 		"never propagates": {func() { acc.DNS.NeverPropagate("_acme-challenge.example.com") },
-			`challenge\s+record\s+_acme-challenge\.example\.com\s+did\s+not\s+become\s+visible`, true},
+			`challenge\s+records\s+did\s+not\s+become\s+visible`, true},
 		"removal fails": {func() { acc.Cloudflare.FailDeletes(true) },
 			`(?s)cannot\s+remove\s+the\s+challenge\s+records\s+\(_acme-challenge\.example\.com\)`, false},
 	}

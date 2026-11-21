@@ -38,14 +38,22 @@ type responder struct {
 
 func startResponder(t *testing.T, txt string, appearAt int32) *responder {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("tcp", conn.LocalAddr().String())
-	if err != nil {
+	// UDP and TCP share a port number; another process may hold the TCP side of the one
+	// the system picked, so try again with another.
+	var conn net.PacketConn
+	var ln net.Listener
+	for attempt := 0; ; attempt++ {
+		var err error
+		if conn, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		if ln, err = net.Listen("tcp", conn.LocalAddr().String()); err == nil {
+			break
+		}
 		_ = conn.Close()
-		t.Fatal(err)
+		if attempt == 50 {
+			t.Fatal(err)
+		}
 	}
 	r := &responder{conn: conn, listener: ln, txt: txt, appearAt: appearAt}
 	t.Cleanup(func() { _ = conn.Close(); _ = ln.Close() })
