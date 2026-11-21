@@ -93,6 +93,11 @@ type Server struct {
 	fail5xx        int
 	rejectNonce    bool
 	revokeRefused  bool
+	omitContact    bool
+	omitCommonName bool
+	// validAuthz holds the valid authorizations by account and identifier, which a later
+	// order of the same account reuses, as a real authority does for a while.
+	validAuthz map[string]*authz
 }
 
 // Start serves the fake over HTTPS.
@@ -106,7 +111,7 @@ func Start(cert tls.Certificate, store *dnsstore.Store) (*Server, error) {
 		nonces: map[string]bool{}, accounts: map[string]*account{}, accountsByID: map[string]*account{},
 		orders: map[string]*order{}, authzs: map[string]*authz{}, challenges: map[string]*challenge{},
 		certs: map[string]*issued{}, revoked: map[string]bool{}, validity: 90 * 24 * time.Hour,
-		failValidation: map[string]bool{},
+		failValidation: map[string]bool{}, validAuthz: map[string]*authz{},
 	}
 	s.Server = fakehttp.StartTLS(http.HandlerFunc(s.handle), cert)
 	return s, nil
@@ -114,6 +119,27 @@ func Start(cert tls.Certificate, store *dnsstore.Store) (*Server, error) {
 
 // DirectoryURL is the ACME directory URL a configuration uses.
 func (s *Server) DirectoryURL() string { return s.URL + "/directory" }
+
+// AlternateDirectoryURL is a second directory URL of the same authority: the same
+// accounts, orders and certificates under another address, for tests that move from one
+// authority URL to another (staging to production, say).
+func (s *Server) AlternateDirectoryURL() string { return s.URL + "/alternate/directory" }
+
+// OmitContact makes account objects leave out the contact list, as Let's Encrypt does.
+// The fake still stores what it was given.
+func (s *Server) OmitContact(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitContact = b
+}
+
+// OmitCommonName makes the authority issue certificates without a subject common name,
+// whatever the signing request asks for.
+func (s *Server) OmitCommonName(b bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitCommonName = b
+}
 
 // SetValidity sets how long issued certificates are valid; zero or less issues
 // certificates that have already expired.
@@ -132,12 +158,36 @@ func (s *Server) FailValidation(identifier string) {
 }
 
 // ClearFailures removes every failure control set by FailValidation, IssueWrongKey,
-// FailFinalize, Fail5xx, RejectNextNonce and RevokeRefused.
+// FailFinalize, Fail5xx, RejectNextNonce and RevokeRefused, and the OmitContact and
+// OmitCommonName switches. It also forgets the valid authorizations, so that the next
+// order has to validate again.
 func (s *Server) ClearFailures() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failValidation = map[string]bool{}
 	s.wrongKey, s.failFinalize, s.fail5xx, s.rejectNonce, s.revokeRefused = false, false, 0, false, false
+	s.omitContact, s.omitCommonName = false, false
+	s.validAuthz = map[string]*authz{}
+}
+
+// ExpireAuthorizations forgets the valid authorizations, so that the next order has to
+// validate every name again.
+func (s *Server) ExpireAuthorizations() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.validAuthz = map[string]*authz{}
+}
+
+// ForgetAuthorization forgets the valid authorization of one identifier (as ordered,
+// for example "*.example.com") of every account.
+func (s *Server) ForgetAuthorization(identifier string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.validAuthz {
+		if strings.HasSuffix(k, "|"+identifier) {
+			delete(s.validAuthz, k)
+		}
+	}
 }
 
 // IssueWrongKey makes the fake issue certificates for another key than the one in the
@@ -265,7 +315,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch r.URL.Path {
-		case "/directory":
+		case "/directory", "/alternate/directory":
 			s.reply(w, http.StatusOK, nil, map[string]any{
 				"newNonce": s.URL + "/acme/new-nonce", "newAccount": s.URL + "/acme/new-acct", "newOrder": s.URL + "/acme/new-order",
 				"revokeCert": s.URL + "/acme/revoke-cert", "meta": map[string]any{"termsOfService": s.URL + "/terms"},
@@ -403,7 +453,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, _ flattenedJWS, p
 }
 
 func (s *Server) accountJSON(a *account) map[string]any {
-	return map[string]any{"status": "valid", "contact": a.contact, "orders": s.URL + "/acme/orders/" + a.id}
+	m := map[string]any{"status": "valid", "orders": s.URL + "/acme/orders/" + a.id}
+	if !s.omitContact {
+		m["contact"] = a.contact
+	}
+	return m
 }
 
 func (s *Server) newAccount(w http.ResponseWriter, payload []byte, hdr protectedHeader) {
@@ -482,6 +536,11 @@ func (s *Server) newOrder(w http.ResponseWriter, payload []byte, a *account) {
 		if id.Type != "dns" || id.Value == "" {
 			s.problem(w, problem{http.StatusBadRequest, "unsupportedIdentifier", "only dns identifiers are supported"})
 			return
+		}
+		if z := s.validAuthz[a.id+"|"+id.Value]; z != nil {
+			o.identifiers = append(o.identifiers, id.Value)
+			o.authzIDs = append(o.authzIDs, z.id)
+			continue
 		}
 		z := &authz{id: s.newID("z"), accountID: a.id, identifier: id.Value, status: "pending"}
 		ch := &challenge{id: s.newID("c"), authzID: z.id, token: s.newID("t"), status: "pending"}
@@ -593,6 +652,7 @@ func (s *Server) respond(w http.ResponseWriter, id string, a *account) {
 			z.status, ch.status, z.problem = "invalid", "invalid", fmt.Sprintf("no TXT record with the expected value at %s", fqdn)
 		default:
 			z.status, ch.status = "valid", "valid"
+			s.validAuthz[a.id+"|"+z.identifier] = z
 		}
 	}
 	out := map[string]any{"type": "dns-01", "url": s.URL + "/acme/chall/" + ch.id, "token": ch.token, "status": ch.status}
@@ -639,7 +699,11 @@ func (s *Server) finalize(w http.ResponseWriter, id string, payload []byte, a *a
 		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		pub = &k.PublicKey
 	}
-	chain, leaf, err := s.ca.Issue(pub, csr.Subject.CommonName, csr.DNSNames, s.validity)
+	cn := csr.Subject.CommonName
+	if s.omitCommonName {
+		cn = ""
+	}
+	chain, leaf, err := s.ca.Issue(pub, cn, csr.DNSNames, s.validity)
 	if err != nil {
 		s.problem(w, problem{http.StatusInternalServerError, "serverInternal", "cannot issue"})
 		return

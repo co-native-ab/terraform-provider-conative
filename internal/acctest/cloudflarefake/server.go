@@ -34,13 +34,14 @@ type Server struct {
 	seq        int
 	failWrites bool
 	failDelete bool
+	readOnly   map[string]bool // tokens that may only read
 }
 
 // Start serves the fake over HTTPS. The API path prefix is /client/v4.
 func Start(cert tls.Certificate, store *dnsstore.Store) *Server {
 	s := &Server{
 		Journal: &fakehttp.Journal{}, store: store,
-		zones: map[string]string{}, tokens: map[string]map[string]bool{}, records: map[string]record{},
+		readOnly: map[string]bool{}, zones: map[string]string{}, tokens: map[string]map[string]bool{}, records: map[string]record{},
 	}
 	s.Server = fakehttp.StartTLS(http.HandlerFunc(s.handle), cert)
 	return s
@@ -71,6 +72,15 @@ func (s *Server) AddToken(token string, zoneNames ...string) {
 		allowed[s.zones[strings.ToLower(n)]] = true
 	}
 	s.tokens[token] = allowed
+}
+
+// AddReadOnlyToken registers a token that may read the zones with the given names but
+// whose every write (POST, PUT, PATCH, DELETE) answers 403.
+func (s *Server) AddReadOnlyToken(token string, zoneNames ...string) {
+	s.AddToken(token, zoneNames...)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readOnly[token] = true
 }
 
 // FailWrites makes every write answer 500.
@@ -146,6 +156,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	allowed, ok := s.tokens[token]
 	if !ok || token == "" {
 		fail(w, http.StatusUnauthorized, 10000, "Authentication error")
+		return
+	}
+	if s.readOnly[token] && r.Method != http.MethodGet {
+		fail(w, http.StatusForbidden, 9109, "Unauthorized to access requested resource (the token can only read)")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/client/v4")
